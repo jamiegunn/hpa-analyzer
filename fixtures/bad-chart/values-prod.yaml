@@ -1,0 +1,19 @@
+# Production overrides - contains regressions the base values don't have,
+# to exercise overlay-variant analysis.
+replicaCount: 4
+
+image:
+  pullPolicy: Always
+
+autoscaling:
+  enabled: true
+  minReplicas: 25        # > maxReplicas (20) -> invalid HPA, prod-only
+  targetCPUUtilizationPercentage: 95
+
+resources:
+  requests:
+    cpu: "2"
+    memory: 4Gi
+  limits:
+    cpu: "1"             # limit < request -> API server rejects, prod-only
+    memory: 4Gi

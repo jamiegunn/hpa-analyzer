@@ -1,0 +1,12 @@
+# Trial / adversarial-review materials (excluded from source control)
+trial/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-witness/
+venv/
+
+# Generated analysis output
+hpa_analysis_report.txt

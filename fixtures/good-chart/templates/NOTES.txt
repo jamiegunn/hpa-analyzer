@@ -1,0 +1,4 @@
+orders-service has been deployed.
+
+  kubectl port-forward svc/{{ include "orders.fullname" . }} 8080:{{ .Values.service.port }}
+  curl localhost:8080/actuator/health

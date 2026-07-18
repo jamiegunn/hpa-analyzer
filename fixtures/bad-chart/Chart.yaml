@@ -1,0 +1,4 @@
+apiVersion: v1
+name: legacy-payments
+version: 1.0
+description: ""

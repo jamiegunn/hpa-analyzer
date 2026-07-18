@@ -1,0 +1,501 @@
+====================================================================================================
+                           HELM CHART / KUBERNETES / JVM QUALITY ANALYSIS                           
+                                        hpa-analyzer v1.0.0                                         
+====================================================================================================
+Target directory : /Users/techdesigns/dev/hpa_analyzer/fixtures/good-chart
+Generated        : 2026-07-18 00:29:42
+Chart            : orders-service v2.3.1 (appVersion 1.14.2)
+
+Files analyzed:
+  chart      : Chart.yaml
+  values     : values.yaml
+  template   : templates/NOTES.txt
+  template   : templates/_helpers.tpl
+  template   : templates/deployment.yaml
+  template   : templates/hpa.yaml
+  template   : templates/pdb.yaml
+  template   : templates/service.yaml
+  template   : templates/tests/test-connection.yaml
+  dockerfile : Dockerfile  [Java 21.0.3, jre]
+
+
+====================================================================================================
+1. EXECUTIVE SUMMARY
+====================================================================================================
+
+  OVERALL QUALITY SCORE : 100.0 / 100   GRADE: A+
+  [##################################################]
+  Analysis mode         : static
+
+  Findings: 0 critical, 0 high, 0 medium, 0 low, 0 info
+
+  No critical or high findings - solid baseline.
+
+
+====================================================================================================
+2. ANALYSIS COVERAGE - WHAT WAS AND WAS NOT CHECKED
+====================================================================================================
+
+Findings can only come from files that were successfully analyzed. Anything marked as failed,
+skipped or unknown below produced NO findings - treat that as missing coverage, never as a clean
+bill of health.
+
++--------------------------------------+--------------------------------------------------+
+| Input                                | Coverage                                         |
++======================================+==================================================+
+| values.yaml                          | base values - used for primary analysis          |
++--------------------------------------+--------------------------------------------------+
+| templates/deployment.yaml            | statically parsed (1 object(s))                  |
++--------------------------------------+--------------------------------------------------+
+| templates/hpa.yaml                   | statically parsed (1 object(s))                  |
++--------------------------------------+--------------------------------------------------+
+| templates/pdb.yaml                   | statically parsed (1 object(s))                  |
++--------------------------------------+--------------------------------------------------+
+| templates/service.yaml               | statically parsed (1 object(s))                  |
++--------------------------------------+--------------------------------------------------+
+| templates/tests/test-connection.yaml | helm test hook - lint-only, not workload-checked |
++--------------------------------------+--------------------------------------------------+
+| Dockerfile                           | parsed (Java 21 detected)                        |
++--------------------------------------+--------------------------------------------------+
+
+Mode: static. Static scrubbing approximates helm rendering: conditionals are analyzed as taken and
+complex template expressions may hide configuration from these checks. Install helm on PATH and
+re-run for rendered-truth analysis - it materially improves precision.
+
+
+====================================================================================================
+3. SCORECARD BY CATEGORY
+====================================================================================================
+
++----------------------------------------+-------+-------+--------+--------------------+
+| Category                               | Score | Grade | Weight | Findings (C/H/M/L) |
++========================================+=======+=======+========+====================+
+| Helm Chart Structure & Hygiene         | 100.0 | A+    | 4      | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Kubernetes Templates & API Versions    | 100.0 | A+    | 5      | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Resource Requests & Limits             | 100.0 | A+    | 15     | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Horizontal Pod Autoscaling             | 100.0 | A+    | 15     | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Availability & Disruption Tolerance    | 100.0 | A+    | 8      | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Health Probes & Lifecycle              | 100.0 | A+    | 10     | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Dockerfile Quality                     | 100.0 | A+    | 8      | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Java / JVM Container Fitness           | 100.0 | A+    | 14     | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Security Posture                       | 100.0 | A+    | 7      | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+| Cross-File Consistency (Chart <-> JVM) | 100.0 | A+    | 14     | -                  |
++----------------------------------------+-------+-------+--------+--------------------+
+
+Scoring model: each category starts at 100; deductions are CRITICAL -25, HIGH -12, MEDIUM -6, LOW
+-3, INFO -0, floored at 0. Overall = weighted mean over applicable categories (N/A categories are
+excluded, not free points).
+
+
+====================================================================================================
+4. FINDINGS AND REMEDIATION
+====================================================================================================
+
+  No findings. Exceptional.
+
+
+====================================================================================================
+5. MATHEMATICAL PROOF TABLES
+====================================================================================================
+
+Every table below derives its verdict from arithmetic on values found in YOUR files (estimates are
+labeled and conservative). Re-check any number by hand.
+
+----------------------------------------------------------------------------------------------------
+TABLE 1: JVM memory budget - Deployment '<orders.fullname>' / container 'orders'
+----------------------------------------------------------------------------------------------------
+Container memory must hold the WHOLE JVM, not just the heap. Estimation model: T = H + Metaspace +
+CodeCache + threads*Xss + DirectBuffers + GC/internal. JVM visibility of the limit: container-aware.
+
++-----------------------------+----------+------------------------------------+
+| Component                   | Size     | Basis                              |
++=============================+==========+====================================+
+| Container memory limit      | 1 GiB    | 1Gi                                |
++-----------------------------+----------+------------------------------------+
+| Max heap (H)                | 512 MiB  | MaxRAMPercentage=50% x limit 1 GiB |
++-----------------------------+----------+------------------------------------+
+| Metaspace (est.)            | 128 MiB  | typical framework app 80-180 MiB   |
++-----------------------------+----------+------------------------------------+
+| JIT code cache (est.)       | 64 MiB   | steady-state                       |
++-----------------------------+----------+------------------------------------+
+| Thread stacks (100 x 1 MiB) | 100 MiB  | -Xss x thread count                |
++-----------------------------+----------+------------------------------------+
+| Direct buffers (est.)       | 64 MiB   | est. 64 MiB typical                |
++-----------------------------+----------+------------------------------------+
+| GC + JVM internal (est.)    | 48 MiB   | card tables, symbols               |
++-----------------------------+----------+------------------------------------+
+| ESTIMATED PEAK RSS (T)      | 916 MiB  | T = H + non-heap components        |
++-----------------------------+----------+------------------------------------+
+| Margin (limit - T)          | +108 MiB | +11% of limit                      |
++-----------------------------+----------+------------------------------------+
+
+  VERDICT: Fits with 108 MiB headroom (11% of limit).
+
+----------------------------------------------------------------------------------------------------
+TABLE 2: CPU as seen by the JVM - Deployment '<orders.fullname>' / container 'orders'
+----------------------------------------------------------------------------------------------------
+Kubernetes CPU limits are CFS quotas; the JVM derives its parallelism from them.
+
++-----------------------+---------------+----------------------------------------------------------+
+| Item                  | Value         | Meaning                                                  |
++=======================+===============+==========================================================+
+| CPU request           | 500m          | guaranteed share under contention; HPA denominator       |
++-----------------------+---------------+----------------------------------------------------------+
+| CPU limit             | none          | pod may use idle node CPU                                |
++-----------------------+---------------+----------------------------------------------------------+
+| availableProcessors() | ALL node CPUs | no CPU limit set and this JDK (>= 11.0.17 / 17) ignores  |
+|                       |               | cpu.shares - availableProcessors() = the node's full CPU |
+|                       |               | count, NOT ceil(request/1000). Pin                       |
+|                       |               | -XX:ActiveProcessorCount for stable pool sizing.         |
++-----------------------+---------------+----------------------------------------------------------+
+| Consequences          |               | sizes GC threads, ForkJoinPool, C2 compiler threads,     |
+|                       |               | Netty event loops                                        |
++-----------------------+---------------+----------------------------------------------------------+
+
+  VERDICT: No CPU limit: generally GOOD for JVMs (no CFS throttle); requests still guarantee fair
+  share under contention.
+
+----------------------------------------------------------------------------------------------------
+TABLE 3: Probe budget vs JVM startup - Deployment '<orders.fullname>' / 'orders'
+----------------------------------------------------------------------------------------------------
+A liveness probe that fires before the JVM can answer does not detect failure - it CAUSES it.
+
++------------------------------------+----------------+--------------------------------------------+
+| Quantity                           | Value          | Note                                       |
++====================================+================+============================================+
+| startupProbe window                | 180s           | liveness is suspended until startup        |
+|                                    |                | succeeds                                   |
++------------------------------------+----------------+--------------------------------------------+
+| liveness initialDelaySeconds       | 0s             |                                            |
++------------------------------------+----------------+--------------------------------------------+
+| liveness period x failureThreshold | 20s x 5 = 100s |                                            |
++------------------------------------+----------------+--------------------------------------------+
+| Worst-case time-to-kill            | 180s           | startup window                             |
++------------------------------------+----------------+--------------------------------------------+
+| Typical JVM app startup            | ~60s           | mid-size Spring Boot on ~1 CPU             |
+|                                    |                | (assumption; measure yours)                |
++------------------------------------+----------------+--------------------------------------------+
+
+  VERDICT: Budget 180s >= ~60s assumed startup: OK, provided startup never exceeds the budget
+  under CPU pressure (verify with the CPU table above).
+
+----------------------------------------------------------------------------------------------------
+TABLE 4: QoS class and eviction order
+----------------------------------------------------------------------------------------------------
+QoS derivation: Guaranteed iff requests == limits for BOTH cpu and memory on every container;
+BestEffort iff none set; else Burstable. Under node memory pressure kubelet evicts BestEffort, then
+Burstable exceeding requests, then Guaranteed last.
+
++----------------------+---------+---------+---------+---------+-----------+-----------------------+
+| Container            | req CPU | req Mem | lim CPU | lim Mem | QoS       | Eviction              |
++======================+=========+=========+=========+=========+===========+=======================+
+| Deployment/<orders.f | 500m    | 1 GiB   | -       | 1 GiB   | Burstable | evicted before        |
+| ullname>:orders      |         |         |         |         |           | Guaranteed            |
++----------------------+---------+---------+---------+---------+-----------+-----------------------+
+
+  VERDICT: For latency-sensitive JVMs aim for Guaranteed memory (request = limit) and request-only
+  CPU.
+
+----------------------------------------------------------------------------------------------------
+TABLE 5: HPA scaling arithmetic - HPA '<orders.fullname>'
+----------------------------------------------------------------------------------------------------
+How the HPA converts measured CPU into replica counts (current replicas = 3 for illustration).
+
++-----------------+---------------+---------------------+-------------------+----------------------+
+| Avg utilization | Per-pod usage | Raw formula         | Desired (clamped) | Action               |
++=================+===============+=====================+===================+======================+
+| 35%             | 175m/pod      | ceil(3 x 35/70) = 2 | 3                 | no change            |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 63%             | 315m/pod      | ceil(3 x 63/70) = 3 | 3                 | no change (within    |
+|                 |               |                     |                   | 10% tolerance)       |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 70%             | 350m/pod      | ceil(3 x 70/70) = 3 | 3                 | no change (within    |
+|                 |               |                     |                   | 10% tolerance)       |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 78%             | 390m/pod      | ceil(3 x 78/70) = 4 | 4                 | scale UP             |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 105%            | 525m/pod      | ceil(3 x 105/70) =  | 5                 | scale UP             |
+|                 |               | 5                   |                   |                      |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 140%            | 700m/pod      | ceil(3 x 140/70) =  | 6                 | scale UP             |
+|                 |               | 6                   |                   |                      |
++-----------------+---------------+---------------------+-------------------+----------------------+
+| 210%            | 1050m/pod     | ceil(3 x 210/70) =  | 9                 | scale UP             |
+|                 |               | 9                   |                   |                      |
++-----------------+---------------+---------------------+-------------------+----------------------+
+
+  VERDICT: Formula: desired = ceil(current x currentUtil / target), clamped to [3, 12], with a
+  +/-10% tolerance dead-band. With cpu request 500m and target 70%, scale-out begins once average
+  usage exceeds ~385m per pod (70% x 500m x 1.1).
+
+----------------------------------------------------------------------------------------------------
+TABLE 6: Availability vs replica floor
+----------------------------------------------------------------------------------------------------
+Redundancy math for the minimum number of pods the chart allows to exist.
+
++------------+------------------------+------------------------------------+
+| Replicas n | Availability 1-(1-p)^n | Expected downtime                  |
++============+========================+====================================+
+| 1          | 99.500000%             | ~216.0 min/month                   |
++------------+------------------------+------------------------------------+
+| 2          | 99.997500%             | ~1.1 min/month                     |
++------------+------------------------+------------------------------------+
+| 3          | 99.999988%             | ~0.32 sec/month  <-- current floor |
++------------+------------------------+------------------------------------+
+| 5          | 100.000000%            | ~0.00 sec/month                    |
++------------+------------------------+------------------------------------+
+
+  VERDICT: Assuming INDEPENDENT pod failures at 99.5% per-pod availability, availability =
+  1-(1-p)^n. Your scale floor is n=3 (HPA minReplicas). n>=2 keeps single-failure downtime
+  negligible; protect it with a PDB. Caveat: the independence assumption is exactly what fails in
+  correlated events (bad deploy, node/zone outage, shared dependency down) - those hit ALL
+  replicas at once and no exponent helps. Treat this table as the upper bound that redundancy
+  alone can buy.
+
+
+====================================================================================================
+6. EDUCATION APPENDIX - WHY THIS MATH MATTERS
+====================================================================================================
+
+
+6.1  THE HPA CONTROL LOOP
+
+  Every ~15s the HPA computes, per metric:  desired = ceil(currentReplicas x currentValue /
+  targetValue), takes the MAX across metrics, applies a +/-10% tolerance dead-band, clamps to
+  [minReplicas, maxReplicas], then applies behavior policies (default: scale-up immediately,
+  scale-down after a 300s stabilization window). Two facts follow directly from the formula:
+      (a) CPU 'utilization' is usage divided by the pod's REQUEST - not its limit, not node
+      capacity. Wrong requests make the HPA scale wrongly, in exact proportion.
+      (b) Any metric that does not fall when replicas rise breaks the loop: desired can never
+      go below current. JVM memory is the canonical example (heap high-water mark).
+
+6.2  THE JVM MEMORY MODEL IN A CONTAINER
+
+      container limit (cgroup memory.max)  <-- kernel kills here (exit 137)
+      +--------------------------------------------------+
+      |  heap (-Xmx / MaxRAMPercentage)                  |
+      |  metaspace (classes; unbounded by default!)      |
+      |  JIT code cache                                  |
+      |  thread stacks (threads x -Xss, ~1 MiB each)     |
+      |  direct/NIO buffers (default cap = Xmx!)         |
+      |  GC bookkeeping, symbols, JVM itself             |
+      +--------------------------------------------------+
+  The kernel enforces the SUM. A heap that fits is necessary but not sufficient - rule of thumb:
+  heap <= 50-75% of the limit, and never less than ~250-400 MiB of absolute non-heap headroom for
+  framework apps. The kernel OOM kill (exit 137) produces NO Java stack trace and NO heap dump: if
+  you see 137/OOMKilled with no OutOfMemoryError in logs, it was the cgroup, not the heap.
+
+6.3  JAVA CONTAINER-AWARENESS TIMELINE
+
++-----------------------+---------------------------------+-----------------+----------------------+
+| JVM                   | Sees cgroup v1 limits?          | Sees cgroup v2? | Heap % flags         |
++=======================+=================================+=================+======================+
+| Java 8 < 8u131        | NO - uses host RAM/CPUs         | NO              | -Xmx only            |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u131 - 8u190         | memory only, with -XX:+UnlockEx | NO              | -Xmx, MaxRAMFraction |
+|                       | perimentalVMOptions -XX:+UseCGr |                 |                      |
+|                       | oupMemoryLimitForHeap           |                 |                      |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u191 - 8u371         | YES (UseContainerSupport        | NO              | MaxRAMPercentage     |
+|                       | backport, default on)           |                 |                      |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u372+                | YES                             | YES             | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 11.0.0 - 11.0.15      | YES                             | NO              | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 11.0.16+, 15+, 17, 21 | YES                             | YES             | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+  cgroup v2 is the default on modern node images (Ubuntu 22.04+, EKS AL2023, current GKE/AKS). A
+  pre-v2 JVM on a v2 node silently falls back to HOST sizing - the worst failure mode returns even
+  though your JDK 'is container aware'.
+
+6.4  A SANE BASELINE FOR A JVM SERVICE CHART
+
++--------------------------------+--------------------------------+--------------------------------+
+| Setting                        | Baseline                       | Reason                         |
++================================+================================+================================+
+| requests.memory =              | e.g. 1Gi / 1Gi                 | memory is incompressible;      |
+| limits.memory                  |                                | Guaranteed-style memory QoS    |
++--------------------------------+--------------------------------+--------------------------------+
+| requests.cpu                   | 250m-1000m ~ typical usage     | HPA denominator; scheduler     |
+|                                |                                | packing                        |
++--------------------------------+--------------------------------+--------------------------------+
+| limits.cpu                     | unset (or >= 2x request)       | avoid CFS throttling of GC/JIT |
+|                                |                                | bursts                         |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:MaxRAMPercentage           | 50-75                          | heap scales with the limit     |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:+ExitOnOutOfMemoryError    | always                         | die visibly; let K8s heal      |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:ActiveProcessorCount       | set if no cpu limit            | stable thread-pool sizing      |
++--------------------------------+--------------------------------+--------------------------------+
+| startupProbe                   | period 5s x threshold 24-60    | protects slow JVM starts from  |
+|                                |                                | liveness                       |
++--------------------------------+--------------------------------+--------------------------------+
+| readiness != liveness          | always                         | shed traffic without restarts  |
++--------------------------------+--------------------------------+--------------------------------+
+| HPA                            | autoscaling/v2, CPU 60-75%,    | headroom for scale-up lag      |
+|                                | min >= 2                       |                                |
++--------------------------------+--------------------------------+--------------------------------+
+| PDB                            | maxUnavailable: 1              | survive drains/upgrades        |
++--------------------------------+--------------------------------+--------------------------------+
+| replicas                       | omit when HPA enabled          | helm upgrade must not reset    |
+|                                |                                | scale                          |
++--------------------------------+--------------------------------+--------------------------------+
+| ENTRYPOINT                     | exec form (java as PID 1)      | SIGTERM -> graceful shutdown   |
++--------------------------------+--------------------------------+--------------------------------+
+
+6.5  THE RELATIVITY TRAP - REQUESTS, NOT LIMITS, DRIVE SCALING
+
+  The HPA computes CPU 'utilization' as usage / REQUEST - never the limit, never node capacity.
+  Set the request as a low placeholder and you lie to the controller. Example: request=100m,
+  limit=2000m, actual usage=150m. The kernel sees a pod using 7.5% of its 2000m ceiling - nowhere
+  near throttling. The HPA sees 150m/100m = 150% utilization and, against a 70% target, scales
+  aggressively to maxReplicas while every pod sits nearly idle. Under-sized requests 'trick' the
+  loop into believing the system is saturated when it is merely active. Right-size requests FIRST
+  (a day of VPA in recommendation mode); accuracy in the denominator is the only route to
+  stability in the output.
+
+6.6  COMPRESSIBLE VS INCOMPRESSIBLE RESOURCES
+
++--------------------+----------------------------------------+------------------------------------+
+|                    | CPU (compressible)                     | Memory (incompressible)            |
++====================+========================================+====================================+
+| Exhaustion         | CFS throttling (slows down)            | OOM kill - SIGKILL (dies)          |
++--------------------+----------------------------------------+------------------------------------+
+| Kernel signal      | container_cpu_cfs_throttled_periods_to | container_memory_working_set_bytes |
+|                    | tal                                    |                                    |
++--------------------+----------------------------------------+------------------------------------+
+| Tracks load?       | yes - roughly linear with work         | no - heap/baseline stays flat      |
++--------------------+----------------------------------------+------------------------------------+
+| Good scale metric? | yes for stateless services             | NO - prone to permanent scale-out  |
++--------------------+----------------------------------------+------------------------------------+
+  Because memory is incompressible and a JVM/Go runtime rarely returns it to the OS, memory
+  'utilization' does not fall when load falls: an HPA on memory ratchets to max and stays.
+  Diagnostic: if container_cpu_cfs_throttled_periods_total climbs while the HPA sits idle, your
+  CPU request is too small or you are scaling on the wrong metric.
+
+6.7  THE UNREADY-POD OUTAGE (dampening logic)
+
+  When new pods fail readiness (bad deploy, missing DB schema) the HPA can REFUSE to scale even at
+  100% CPU on the ready pods. Its four-step logic: (1) group pods Ready / Unready / Ignored; (2)
+  first pass uses Ready pods only; (3) if that says scale-up, add the Unready pods back at 0%
+  usage; (4) if the resulting ratio is within a +/-10% tolerance of target, do nothing. With
+  maxSurge=100%, two hot pods plus two unready-at-0% average to (100+100+0+0)/4 = 50%, well inside
+  the tolerance of a 70% target - so scaling STOPS exactly when you need it. Mitigation: keep
+  maxSurge at 25-50% so the ready pods' signal survives the dampening.
+
+6.8  THRASHING, STABILIZATION, AND THE HPA+VPA DEATH SPIRAL
+
+  Thrashing: high metric -> scale up -> load per pod drops -> scale down -> load spikes -> repeat,
+  churning pods and cold caches. Damp it with stabilizationWindowSeconds over a rolling history.
+  The production pattern is ASYMMETRIC - react up fast, release down slowly:
+    behavior:
+      scaleUp:   { stabilizationWindowSeconds: 0,   policies: [{type: Percent, value: 100,
+    periodSeconds: 15}] }
+      scaleDown: { stabilizationWindowSeconds: 300, policies: [{type: Percent, value: 10,
+    periodSeconds: 60}] }
+  HPA+VPA on the SAME resource is a death spiral: VPA lowers the request because usage is low; the
+  HPA sees a smaller denominator, computes higher utilization, and scales out unnecessarily. Rule:
+  never let both auto-update the same resource. Use VPA in recommendation/initial mode to
+  right-size requests; use the HPA to handle traffic. Also beware I/O-bound services: waiting on a
+  lock or a slow downstream shows LOW CPU, so a CPU HPA never scales even as p99 breaches the SLO
+  - scale those on latency or queue depth.
+
+6.9  DEMAND METRICS - SCALE ON CAUSE, NOT SYMPTOM
+
+  CPU/memory are lagging symptoms. Demand metrics track the cause:
++--------------------+--------------------------+--------------------------+
+| Signal             | Best for                 | Target rule of thumb     |
++====================+==========================+==========================+
+| Requests/sec (RPS) | stateless HTTP           | linear proxy for demand  |
++--------------------+--------------------------+--------------------------+
+| Queue depth / lag  | workers (Kafka/RabbitMQ) | ~30s of work to process  |
++--------------------+--------------------------+--------------------------+
+| p99 latency        | SLO-sensitive APIs       | p95 = 50% of the SLO     |
++--------------------+--------------------------+--------------------------+
+| CPU utilization    | general compute          | 50-75% (60-75% for JVMs) |
++--------------------+--------------------------+--------------------------+
+  Expose app metrics via the Prometheus Adapter, or drive scaling from external event sources with
+  KEDA (queues, streams, cron). RPS scales linearly regardless of I/O wait, which is why it beats
+  CPU for latency-bound services.
+
+6.10  PREDICTIVE SCALING AND THE SCALING-INVARIANT SIGNAL
+
+  Reactive scaling has a 'startup gap': the sync period (~15s) plus metrics-server scrape latency
+  (30-60s) plus pod schedule + image pull + JVM warmup means the system is blind to the first
+  minute of a surge. Predictive scaling forecasts load (e.g. Holt's / triple-exponential
+  smoothing) and provisions capacity BEFORE the peak. It must forecast on a CLUSTER-WIDE AGGREGATE
+  (sum of per-pod metrics), not a per-pod average: adding replicas drops the average even as total
+  load rises, so the average is not a stable time series. The aggregate is scaling-invariant -
+  stable however load redistributes - which is what makes clean extrapolation possible. A typical
+  pipeline: align irregular batches onto a uniform grid, impute missing pods by carrying forward,
+  gradually weight in new pods (so a starting pod is not read as a load 'drop'), forecast to the
+  init-timeout horizon, then solve for the replica count needed now so capacity is ready when the
+  peak arrives.
+
+6.11  WORKLOAD -> SCALER DECISION FRAMEWORK
+
++----------------------+-------------------+------------------+------------------+
+| Workload             | Signal            | Tool             | Target           |
++======================+===================+==================+==================+
+| Stateless HTTP       | RPS / CPU         | HPA              | 50-60% CPU       |
++----------------------+-------------------+------------------+------------------+
+| I/O-bound API        | p99 latency       | HPA + Prometheus | p95 = 50% of SLO |
++----------------------+-------------------+------------------+------------------+
+| Message consumer     | queue depth / lag | KEDA             | ~30s of work     |
++----------------------+-------------------+------------------+------------------+
+| Stateful / singleton | historical usage  | VPA (recommend)  | n/a              |
++----------------------+-------------------+------------------+------------------+
+  Non-negotiables: minReplicas >= 2 (no single point of failure at scale-in); a
+  PodDisruptionBudget so the HPA/drains cannot evict every pod at once; right-size requests before
+  setting targets.
+
+6.12  HOW TO READ THE 'BASIS' LINE ON EACH FINDING
+
+  Every finding declares how the tool knows what it claims, so a guess never reads like a
+  measurement: OBSERVED = read directly from your files (stated as fact); DERIVED = arithmetic on
+  your values using the stated model and estimated non-heap constants (re-check with measured
+  numbers); ASSUMED = the tool could NOT see the truth and fell back to a guess - it prints an
+  'Assumes:' line, is flagged in the fix-first list, and (if CRITICAL) is capped at HIGH's score
+  weight so the tool's own uncertainty can never sink your grade. When in doubt, act on OBSERVED
+  first and verify ASSUMED before touching anything.
+
+6.13  GOLDEN RULES
+
+  1. The HPA divides by requests: requests ARE your scaling policy.
+  2. The kernel sums everything: budget the whole JVM, not the heap.
+  3. Kubernetes restarts what dies: make the JVM die on OOM, cleanly on SIGTERM.
+  4. Never scale a JVM on memory utilization.
+  5. Anything mutable ('latest', unpinned bases, helm-managed replicas under an HPA) will
+  eventually mutate mid-incident.
+  6. Scale up fast, scale down slow; never run HPA and VPA on the same resource.
+
+
+====================================================================================================
+7. METHODOLOGY AND LIMITATIONS
+====================================================================================================
+
+Analysis mode: static. Templates were parsed with Go-template expressions scrubbed and, where
+possible, resolved from values.yaml, WITHOUT executing helm. Conditional blocks are analyzed as if
+taken; complex expressions (tpl, printf, required, subcharts) are beyond static resolution and files
+that failed to parse produced no findings at all - the coverage section lists every such gap.
+Installing helm and re-running upgrades this report to rendered-truth analysis. Numeric estimates
+(metaspace, thread counts, node sizes, startup times, per-pod availability) are stated inline and
+should be replaced with your measured values for final sizing decisions; conclusions drawn from
+estimates say so. Complement this report with: helm lint && helm template | kubeconform, a policy
+engine (Polaris/Kyverno/OPA), and real load-test data with GC logs (-Xlog:gc* / -XX:+PrintGCDetails)
+and kubectl top / VPA recommendations.
+
+====================================================================================================
+                                           END OF REPORT                                            
+====================================================================================================
