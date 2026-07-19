@@ -2,8 +2,8 @@
                            HELM CHART / KUBERNETES / JVM QUALITY ANALYSIS                           
                                         hpa-analyzer v1.0.0                                         
 ====================================================================================================
-Target directory : /Users/techdesigns/dev/hpa_analyzer/fixtures/bad-chart
-Generated        : 2026-07-18 00:29:42
+Target directory : /home/claude/hpa_analyzer/fixtures/bad-chart
+Generated        : 2026-07-19 04:26:22
 Chart            : legacy-payments v1.0 (appVersion ?)
 
 Files analyzed:
@@ -35,7 +35,7 @@ Files analyzed:
     4. [RS002] Memory quantity uses 'm' (MILLI-bytes)  (values.yaml)
     5. [RS006] CPU limit below CPU request (invalid)  (templates/deployment.yaml)   [overlay
     values-prod.yaml only]
-    ... and 6 more critical finding(s) - see the full list in section 4.
+    ... and 6 more critical finding(s) - see the Findings section below.
 
 
 ====================================================================================================
@@ -512,154 +512,43 @@ MEDIUM  (14)
 ----------------------------------------------------------------------------------------------------
 LOW  (16)
 ----------------------------------------------------------------------------------------------------
-
-[HP007] Very wide HPA range
-    Category: Horizontal Pod Autoscaling | templates/hpa.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : HPA 'RELEASE-NAME-payments': min=1, max=20 (20x).
-    Why   : A 10x+ band usually means requests were never right-sized; check the cluster can
-    actually schedule max pods (max x request <= cluster headroom) or scaling silently stops at
-    Pending pods.
-    Fix   : Verify capacity: maxReplicas x cpu request and x memory request.
-
-[HP030] No HPA behavior block (defaults apply)
-    Category: Horizontal Pod Autoscaling | templates/hpa.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : HPA 'RELEASE-NAME-payments' relies on default scaling behavior.
-    Why   : Defaults: scale-up may double pods every 15s (or +4 pods, whichever is larger) with
-    0s stabilization; scale-down waits 300s. For slow-starting JVMs an aggressive default
-    scale-up adds many cold pods that all JIT-compile at once (CPU burst -> even higher
-    utilization -> more scaling: a warmup storm).
-    Fix   : Add behavior.scaleUp with a stabilizationWindowSeconds of 60-120s and/or policies
-    limiting pods-per-minute; keep scale-down conservative.
-
-[JV024] Xms != Xmx in a container
-    Category: Java / JVM Container Fitness | Dockerfile
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : -Xms 512 MiB vs -Xmx 3 GiB. [currently INERT - defined but never applied; see DF013]
-    Why   : The pod's memory REQUEST must cover Xmx anyway (the heap will get there under load
-    and memory is rarely returned). Growing the heap in steps just adds early GC cycles and
-    page-fault latency; you gain nothing you can bin-pack on.
-    Fix   : Set Xms = Xmx (or AlwaysPreTouch for latency-critical pods).
-
-[JV027] GC not pinned - ergonomics may pick SerialGC in-container
-    Category: Java / JVM Container Fitness | Dockerfile
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Java 8 with no applied collector flag.
-    Why   : JVM ergonomics picks the collector from visible CPUs/RAM: with <2 CPUs or <~1792 MiB
-    visible, you get SerialGC - single-threaded, long pauses - and a CPU limit of 1000m means
-    exactly that. Java 8's default (Parallel) also differs from 9+ (G1): upgrades silently
-    change GC behavior.
-    Fix   : Pin the collector explicitly (-XX:+UseG1GC for most services).
-
-[AV003] No pod anti-affinity / topology spread
-    Category: Availability & Disruption Tolerance | templates/deployment.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Deployment 'RELEASE-NAME-payments': neither podAntiAffinity nor
-    topologySpreadConstraints set.
-    Why   : Multiple replicas may all land on ONE node; a single node failure then behaves
-    exactly like replicas=1. Scaling out via HPA without spreading also concentrates the new
-    load.
-    Fix   : Add topologySpreadConstraints on kubernetes.io/hostname (and zone) with maxSkew: 1.
-
-[DF004] Full JDK in final image (no multi-stage build)
-    Category: Dockerfile Quality | Dockerfile
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Final image openjdk:8u151-jdk is a JDK and the Dockerfile has a single stage.
-    Why   : A JDK ships compilers and tools the service never uses: bigger attack surface,
-    bigger pulls (slower cold starts - which matters when the HPA is adding pods under load).
-    Fix   : Multi-stage: build with the JDK image, run on the matching -jre (or distroless/java)
-    image.
-
-[SC003] Linux capabilities not dropped
-    Category: Security Posture | templates/deployment.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Deployment 'RELEASE-NAME-payments', container 'payments': capabilities.drop does not
-    include ALL.
-    Why   : Default capability set includes NET_RAW etc.; a Java service needs none of them.
-    Fix   : capabilities: { drop: [ALL] }.
-
-[SC004] Root filesystem writable
-    Category: Security Posture | templates/deployment.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Deployment 'RELEASE-NAME-payments', container 'payments': readOnlyRootFilesystem not
-    true.
-    Why   : Read-only rootfs blocks attackers dropping tools/persisting; JVMs typically only
-    need /tmp (mount an emptyDir).
-    Fix   : Set readOnlyRootFilesystem: true and mount emptyDir at /tmp (add -Djava.io.tmpdir if
-    needed).
-
-[TP012] Deployment has no labels at all
-    Category: Kubernetes Templates & API Versions | templates/deployment.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Deployment 'RELEASE-NAME-payments' defines no metadata.labels.
-    Why   : Unlabeled objects are invisible to selectors and monitoring.
-    Fix   : Add the standard app.kubernetes.io/* label set.
-
-[TP012] HorizontalPodAutoscaler has no labels at all
-    Category: Kubernetes Templates & API Versions | templates/hpa.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : HorizontalPodAutoscaler 'RELEASE-NAME-payments' defines no metadata.labels.
-    Why   : Unlabeled objects are invisible to selectors and monitoring.
-    Fix   : Add the standard app.kubernetes.io/* label set.
-
-[TP012] Service has no labels at all
-    Category: Kubernetes Templates & API Versions | templates/service.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : Service 'RELEASE-NAME-payments' defines no metadata.labels.
-    Why   : Unlabeled objects are invisible to selectors and monitoring.
-    Fix   : Add the standard app.kubernetes.io/* label set.
-
-[CH007] No appVersion in Chart.yaml
-    Category: Helm Chart Structure & Hygiene | Chart.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : appVersion is not set.
-    Why   : appVersion documents which application build the chart deploys and is the
-    conventional default for the image tag (.Chart.AppVersion). Without it, image tags tend to
-    drift to 'latest'.
-    Fix   : Set appVersion to the deployed application version and reference it as the default
-    image tag.
-
-[CH008] No chart description
-    Category: Helm Chart Structure & Hygiene | Chart.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : description is not set.
-    Why   : Descriptions surface in 'helm search' and chart repos; missing metadata makes the
-    chart look unmaintained.
-    Fix   : Add a one-line description.
-
-[CH010] No kubeVersion constraint
-    Category: Helm Chart Structure & Hygiene | Chart.yaml
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : kubeVersion is not set.
-    Why   : Without a kubeVersion constraint the chart will happily install onto clusters whose
-    APIs it does not support (e.g. autoscaling/v2 requires Kubernetes >= 1.23), failing at apply
-    time instead of install time.
-    Fix   : Add e.g. kubeVersion: ">=1.23.0-0".
-
-[CH021] No _helpers.tpl
-    Category: Helm Chart Structure & Hygiene
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : templates/_helpers.tpl not found.
-    Why   : Name/label boilerplate gets duplicated per template without helpers, which is how
-    label drift (and broken selectors) happens.
-    Fix   : Add _helpers.tpl with <chart>.name, <chart>.fullname, <chart>.labels and
-    <chart>.selectorLabels helpers.
-
-[CH023] No values.schema.json
-    Category: Helm Chart Structure & Hygiene
-    Basis : OBSERVED - read directly from your files (stated as fact).
-    Found : values.schema.json not found.
-    Why   : Schema validation rejects typo'd or type-mismatched values at install time (e.g.
-    memory: 512 instead of '512Mi') - exactly the class of error that breaks resources/HPA
-    silently.
-    Fix   : Add values.schema.json (JSON Schema) covering at least resources and autoscaling
-    blocks.
+  Summarized (one line each) - run with --all for the full Why/Math/Fix on each:
+    [HP007] Very wide HPA range (templates/hpa.yaml) -> Verify capacity: maxReplicas x cpu
+    request and x memory request.
+    [HP030] No HPA behavior block (defaults apply) (templates/hpa.yaml) -> Add behavior.scaleUp
+    with a stabilizationWindowSeconds of 60-120s and/or policies limiting pods-per-minute; keep
+    scale-down conservative.
+    [JV024] Xms != Xmx in a container (Dockerfile) -> Set Xms = Xmx (or AlwaysPreTouch for
+    latency-critical pods).
+    [JV027] GC not pinned - ergonomics may pick SerialGC in-container (Dockerfile) -> Pin the
+    collector explicitly (-XX:+UseG1GC for most services).
+    [AV003] No pod anti-affinity / topology spread (templates/deployment.yaml) -> Add
+    topologySpreadConstraints on kubernetes.io/hostname (and zone) with maxSkew: 1.
+    [DF004] Full JDK in final image (no multi-stage build) (Dockerfile) -> Multi-stage: build
+    with the JDK image, run on the matching -jre (or distroless/java) image.
+    [SC003] Linux capabilities not dropped (templates/deployment.yaml) -> capabilities: { drop:
+    [ALL] }.
+    [SC004] Root filesystem writable (templates/deployment.yaml) -> Set readOnlyRootFilesystem:
+    true and mount emptyDir at /tmp (add -Djava.io.tmpdir if needed).
+    [TP012] Deployment has no labels at all (templates/deployment.yaml) -> Add the standard
+    app.kubernetes.io/* label set.
+    [TP012] HorizontalPodAutoscaler has no labels at all (templates/hpa.yaml) -> Add the
+    standard app.kubernetes.io/* label set.
+    [TP012] Service has no labels at all (templates/service.yaml) -> Add the standard
+    app.kubernetes.io/* label set.
+    [CH007] No appVersion in Chart.yaml (Chart.yaml) -> Set appVersion to the deployed
+    application version and reference it as the default image tag.
+    [CH008] No chart description (Chart.yaml) -> Add a one-line description.
+    [CH010] No kubeVersion constraint (Chart.yaml) -> Add e.g. kubeVersion: ">=1.23.0-0".
+    [CH021] No _helpers.tpl -> Add _helpers.tpl with <chart>.name, <chart>.fullname,
+    <chart>.labels and <chart>.selectorLabels helpers.
+    [CH023] No values.schema.json -> Add values.schema.json (JSON Schema) covering at least
+    resources and autoscaling blocks.
 
 ----------------------------------------------------------------------------------------------------
 INFO  (8)
 ----------------------------------------------------------------------------------------------------
-  Housekeeping items - zero score impact, one line each so they stop competing with real problems:
+  Housekeeping - zero score impact, one line each so they stop competing with real problems:
     [DF025] No .dockerignore (Dockerfile) -> Add .dockerignore.
     [SC006] ServiceAccount token automounted (templates/deployment.yaml) -> Set
     automountServiceAccountToken: false on the pod spec (or SA).
@@ -833,222 +722,85 @@ Redundancy math for the minimum number of pods the chart allows to exist.
 
 
 ====================================================================================================
-6. EDUCATION APPENDIX - WHY THIS MATH MATTERS
+6. VERIFY ON YOUR CLUSTER - CLOSE THE GAPS STATIC ANALYSIS CAN'T
 ====================================================================================================
 
+This tool reads files, not a cluster. Each item below is a real Kubernetes behaviour it cannot see
+from the chart; run the command to close the gap, then read the result as described. Only the checks
+relevant to THIS chart are shown; names and selectors are filled in from your files where resolved
+(placeholders like <namespace> are yours to substitute).
 
-6.1  THE HPA CONTROL LOOP
+----------------------------------------------------------------------------------------------------
+[metrics-pipeline] Will the HPA actually scale?
+----------------------------------------------------------------------------------------------------
+    Gap  : Static files cannot show whether metrics-server / a custom-metrics adapter is
+    installed, or the HPA's live status.
+    Run  :
+        $ kubectl describe hpa <release>-<name> -n <namespace>
+        $ kubectl top pods -n <namespace> -l app=payments
+    Read : In `describe hpa`, the Conditions block must show `ScalingActive True`. `AbleToScale
+    False` / `FailedGetResourceMetric` means the metrics API is not serving this HPA -
+    install/repair metrics-server (CPU & memory targets).
 
-  Every ~15s the HPA computes, per metric:  desired = ceil(currentReplicas x currentValue /
-  targetValue), takes the MAX across metrics, applies a +/-10% tolerance dead-band, clamps to
-  [minReplicas, maxReplicas], then applies behavior policies (default: scale-up immediately,
-  scale-down after a 300s stabilization window). Two facts follow directly from the formula:
-      (a) CPU 'utilization' is usage divided by the pod's REQUEST - not its limit, not node
-      capacity. Wrong requests make the HPA scale wrongly, in exact proportion.
-      (b) Any metric that does not fall when replicas rise breaks the loop: desired can never
-      go below current. JVM memory is the canonical example (heap high-water mark).
+----------------------------------------------------------------------------------------------------
+[limitrange] Are the 'missing' requests defaulted at admission?
+----------------------------------------------------------------------------------------------------
+    Gap  : A namespace LimitRange can inject requests/limits this report flags as absent -
+    changing the real QoS and scheduling.
+    Run  :
+        $ kubectl get limitrange -n <namespace> -o yaml
+        $ kubectl get pods -n <namespace> -l app=payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass
+    Read : A `LimitRange` with `defaultRequest`/`default` for `type: Container` supplies the
+    values flagged missing - so the real `status.qosClass` (second command) may be
+    Burstable/Guaranteed, not BestEffort. No LimitRange: the findings stand.
 
-6.2  THE JVM MEMORY MODEL IN A CONTAINER
+----------------------------------------------------------------------------------------------------
+[api-removal] Is the deprecated API fatal on YOUR cluster?
+----------------------------------------------------------------------------------------------------
+    Gap  : Whether a removed-API object is rejected depends on the target cluster's version,
+    which the files do not name.
+    Run  :
+        $ kubectl version -o json | grep -A3 serverVersion
+        $ kubectl get --raw /metrics 2>/dev/null | grep apiserver_requested_deprecated_apis
+    Read : If the server minor version is at or past the removal version named in the TP010
+    finding, `helm upgrade`/`kubectl apply` of that object WILL be rejected - migrate before the
+    upgrade. The `/metrics` line shows whether anything on the live cluster is still calling the
+    deprecated API.
 
-      container limit (cgroup memory.max)  <-- kernel kills here (exit 137)
-      +--------------------------------------------------+
-      |  heap (-Xmx / MaxRAMPercentage)                  |
-      |  metaspace (classes; unbounded by default!)      |
-      |  JIT code cache                                  |
-      |  thread stacks (threads x -Xss, ~1 MiB each)     |
-      |  direct/NIO buffers (default cap = Xmx!)         |
-      |  GC bookkeeping, symbols, JVM itself             |
-      +--------------------------------------------------+
-  The kernel enforces the SUM. A heap that fits is necessary but not sufficient - rule of thumb:
-  heap <= 50-75% of the limit, and never less than ~250-400 MiB of absolute non-heap headroom for
-  framework apps. The kernel OOM kill (exit 137) produces NO Java stack trace and NO heap dump: if
-  you see 137/OOMKilled with no OutOfMemoryError in logs, it was the cgroup, not the heap.
+----------------------------------------------------------------------------------------------------
+[resourcequota] Could a namespace quota reject this workload?
+----------------------------------------------------------------------------------------------------
+    Gap  : A ResourceQuota can reject an otherwise-valid pod; quotas live in the cluster, not
+    the chart.
+    Run  :
+        $ kubectl get resourcequota -n <namespace> -o yaml
+    Read : If `status.used` is near `status.hard` for cpu/memory/pods, the workload may be
+    rejected at admission even though this chart is internally valid.
 
-6.3  JAVA CONTAINER-AWARENESS TIMELINE
+----------------------------------------------------------------------------------------------------
+[jvm-sees-limit] Does the JVM actually see the cgroup limit?
+----------------------------------------------------------------------------------------------------
+    Gap  : The heap the JVM chooses at runtime depends on whether it can read the container
+    limit - which depends on the JDK build and the node's cgroup version, neither fully knowable
+    from files.
+    Run  :
+        $ kubectl exec -n <namespace> $(kubectl get pod -n <namespace> -l app=payments -o name | head -1) -- java -XX:+PrintFlagsFinal -version 2>/dev/null | grep -E 'MaxHeapSize|MaxRAMPercentage|UseContainerSupport|ActiveProcessorCount'
+        $ kubectl exec -n <namespace> $(kubectl get pod -n <namespace> -l app=payments -o name | head -1) -- sh -c 'stat -fc %T /sys/fs/cgroup'   # cgroup2fs = cgroup v2
+    Read : `MaxHeapSize` should be ~ (your memory LIMIT x the heap percentage), NOT ~1/4 of the
+    node's RAM - the latter means the JVM is sizing from the host (old JDK or cgroup-v2
+    blindness). `cgroup2fs` confirms a v2 node; verify your JDK supports it (8u372+ / 11.0.16+ /
+    15+).
 
-+-----------------------+---------------------------------+-----------------+----------------------+
-| JVM                   | Sees cgroup v1 limits?          | Sees cgroup v2? | Heap % flags         |
-+=======================+=================================+=================+======================+
-| Java 8 < 8u131        | NO - uses host RAM/CPUs         | NO              | -Xmx only            |
-+-----------------------+---------------------------------+-----------------+----------------------+
-| 8u131 - 8u190         | memory only, with -XX:+UnlockEx | NO              | -Xmx, MaxRAMFraction |
-|                       | perimentalVMOptions -XX:+UseCGr |                 |                      |
-|                       | oupMemoryLimitForHeap           |                 |                      |
-+-----------------------+---------------------------------+-----------------+----------------------+
-| 8u191 - 8u371         | YES (UseContainerSupport        | NO              | MaxRAMPercentage     |
-|                       | backport, default on)           |                 |                      |
-+-----------------------+---------------------------------+-----------------+----------------------+
-| 8u372+                | YES                             | YES             | MaxRAMPercentage     |
-+-----------------------+---------------------------------+-----------------+----------------------+
-| 11.0.0 - 11.0.15      | YES                             | NO              | MaxRAMPercentage     |
-+-----------------------+---------------------------------+-----------------+----------------------+
-| 11.0.16+, 15+, 17, 21 | YES                             | YES             | MaxRAMPercentage     |
-+-----------------------+---------------------------------+-----------------+----------------------+
-  cgroup v2 is the default on modern node images (Ubuntu 22.04+, EKS AL2023, current GKE/AKS). A
-  pre-v2 JVM on a v2 node silently falls back to HOST sizing - the worst failure mode returns even
-  though your JDK 'is container aware'.
-
-6.4  A SANE BASELINE FOR A JVM SERVICE CHART
-
-+--------------------------------+--------------------------------+--------------------------------+
-| Setting                        | Baseline                       | Reason                         |
-+================================+================================+================================+
-| requests.memory =              | e.g. 1Gi / 1Gi                 | memory is incompressible;      |
-| limits.memory                  |                                | Guaranteed-style memory QoS    |
-+--------------------------------+--------------------------------+--------------------------------+
-| requests.cpu                   | 250m-1000m ~ typical usage     | HPA denominator; scheduler     |
-|                                |                                | packing                        |
-+--------------------------------+--------------------------------+--------------------------------+
-| limits.cpu                     | unset (or >= 2x request)       | avoid CFS throttling of GC/JIT |
-|                                |                                | bursts                         |
-+--------------------------------+--------------------------------+--------------------------------+
-| -XX:MaxRAMPercentage           | 50-75                          | heap scales with the limit     |
-+--------------------------------+--------------------------------+--------------------------------+
-| -XX:+ExitOnOutOfMemoryError    | always                         | die visibly; let K8s heal      |
-+--------------------------------+--------------------------------+--------------------------------+
-| -XX:ActiveProcessorCount       | set if no cpu limit            | stable thread-pool sizing      |
-+--------------------------------+--------------------------------+--------------------------------+
-| startupProbe                   | period 5s x threshold 24-60    | protects slow JVM starts from  |
-|                                |                                | liveness                       |
-+--------------------------------+--------------------------------+--------------------------------+
-| readiness != liveness          | always                         | shed traffic without restarts  |
-+--------------------------------+--------------------------------+--------------------------------+
-| HPA                            | autoscaling/v2, CPU 60-75%,    | headroom for scale-up lag      |
-|                                | min >= 2                       |                                |
-+--------------------------------+--------------------------------+--------------------------------+
-| PDB                            | maxUnavailable: 1              | survive drains/upgrades        |
-+--------------------------------+--------------------------------+--------------------------------+
-| replicas                       | omit when HPA enabled          | helm upgrade must not reset    |
-|                                |                                | scale                          |
-+--------------------------------+--------------------------------+--------------------------------+
-| ENTRYPOINT                     | exec form (java as PID 1)      | SIGTERM -> graceful shutdown   |
-+--------------------------------+--------------------------------+--------------------------------+
-
-6.5  THE RELATIVITY TRAP - REQUESTS, NOT LIMITS, DRIVE SCALING
-
-  The HPA computes CPU 'utilization' as usage / REQUEST - never the limit, never node capacity.
-  Set the request as a low placeholder and you lie to the controller. Example: request=100m,
-  limit=2000m, actual usage=150m. The kernel sees a pod using 7.5% of its 2000m ceiling - nowhere
-  near throttling. The HPA sees 150m/100m = 150% utilization and, against a 70% target, scales
-  aggressively to maxReplicas while every pod sits nearly idle. Under-sized requests 'trick' the
-  loop into believing the system is saturated when it is merely active. Right-size requests FIRST
-  (a day of VPA in recommendation mode); accuracy in the denominator is the only route to
-  stability in the output.
-
-6.6  COMPRESSIBLE VS INCOMPRESSIBLE RESOURCES
-
-+--------------------+----------------------------------------+------------------------------------+
-|                    | CPU (compressible)                     | Memory (incompressible)            |
-+====================+========================================+====================================+
-| Exhaustion         | CFS throttling (slows down)            | OOM kill - SIGKILL (dies)          |
-+--------------------+----------------------------------------+------------------------------------+
-| Kernel signal      | container_cpu_cfs_throttled_periods_to | container_memory_working_set_bytes |
-|                    | tal                                    |                                    |
-+--------------------+----------------------------------------+------------------------------------+
-| Tracks load?       | yes - roughly linear with work         | no - heap/baseline stays flat      |
-+--------------------+----------------------------------------+------------------------------------+
-| Good scale metric? | yes for stateless services             | NO - prone to permanent scale-out  |
-+--------------------+----------------------------------------+------------------------------------+
-  Because memory is incompressible and a JVM/Go runtime rarely returns it to the OS, memory
-  'utilization' does not fall when load falls: an HPA on memory ratchets to max and stays.
-  Diagnostic: if container_cpu_cfs_throttled_periods_total climbs while the HPA sits idle, your
-  CPU request is too small or you are scaling on the wrong metric.
-
-6.7  THE UNREADY-POD OUTAGE (dampening logic)
-
-  When new pods fail readiness (bad deploy, missing DB schema) the HPA can REFUSE to scale even at
-  100% CPU on the ready pods. Its four-step logic: (1) group pods Ready / Unready / Ignored; (2)
-  first pass uses Ready pods only; (3) if that says scale-up, add the Unready pods back at 0%
-  usage; (4) if the resulting ratio is within a +/-10% tolerance of target, do nothing. With
-  maxSurge=100%, two hot pods plus two unready-at-0% average to (100+100+0+0)/4 = 50%, well inside
-  the tolerance of a 70% target - so scaling STOPS exactly when you need it. Mitigation: keep
-  maxSurge at 25-50% so the ready pods' signal survives the dampening.
-
-6.8  THRASHING, STABILIZATION, AND THE HPA+VPA DEATH SPIRAL
-
-  Thrashing: high metric -> scale up -> load per pod drops -> scale down -> load spikes -> repeat,
-  churning pods and cold caches. Damp it with stabilizationWindowSeconds over a rolling history.
-  The production pattern is ASYMMETRIC - react up fast, release down slowly:
-    behavior:
-      scaleUp:   { stabilizationWindowSeconds: 0,   policies: [{type: Percent, value: 100,
-    periodSeconds: 15}] }
-      scaleDown: { stabilizationWindowSeconds: 300, policies: [{type: Percent, value: 10,
-    periodSeconds: 60}] }
-  HPA+VPA on the SAME resource is a death spiral: VPA lowers the request because usage is low; the
-  HPA sees a smaller denominator, computes higher utilization, and scales out unnecessarily. Rule:
-  never let both auto-update the same resource. Use VPA in recommendation/initial mode to
-  right-size requests; use the HPA to handle traffic. Also beware I/O-bound services: waiting on a
-  lock or a slow downstream shows LOW CPU, so a CPU HPA never scales even as p99 breaches the SLO
-  - scale those on latency or queue depth.
-
-6.9  DEMAND METRICS - SCALE ON CAUSE, NOT SYMPTOM
-
-  CPU/memory are lagging symptoms. Demand metrics track the cause:
-+--------------------+--------------------------+--------------------------+
-| Signal             | Best for                 | Target rule of thumb     |
-+====================+==========================+==========================+
-| Requests/sec (RPS) | stateless HTTP           | linear proxy for demand  |
-+--------------------+--------------------------+--------------------------+
-| Queue depth / lag  | workers (Kafka/RabbitMQ) | ~30s of work to process  |
-+--------------------+--------------------------+--------------------------+
-| p99 latency        | SLO-sensitive APIs       | p95 = 50% of the SLO     |
-+--------------------+--------------------------+--------------------------+
-| CPU utilization    | general compute          | 50-75% (60-75% for JVMs) |
-+--------------------+--------------------------+--------------------------+
-  Expose app metrics via the Prometheus Adapter, or drive scaling from external event sources with
-  KEDA (queues, streams, cron). RPS scales linearly regardless of I/O wait, which is why it beats
-  CPU for latency-bound services.
-
-6.10  PREDICTIVE SCALING AND THE SCALING-INVARIANT SIGNAL
-
-  Reactive scaling has a 'startup gap': the sync period (~15s) plus metrics-server scrape latency
-  (30-60s) plus pod schedule + image pull + JVM warmup means the system is blind to the first
-  minute of a surge. Predictive scaling forecasts load (e.g. Holt's / triple-exponential
-  smoothing) and provisions capacity BEFORE the peak. It must forecast on a CLUSTER-WIDE AGGREGATE
-  (sum of per-pod metrics), not a per-pod average: adding replicas drops the average even as total
-  load rises, so the average is not a stable time series. The aggregate is scaling-invariant -
-  stable however load redistributes - which is what makes clean extrapolation possible. A typical
-  pipeline: align irregular batches onto a uniform grid, impute missing pods by carrying forward,
-  gradually weight in new pods (so a starting pod is not read as a load 'drop'), forecast to the
-  init-timeout horizon, then solve for the replica count needed now so capacity is ready when the
-  peak arrives.
-
-6.11  WORKLOAD -> SCALER DECISION FRAMEWORK
-
-+----------------------+-------------------+------------------+------------------+
-| Workload             | Signal            | Tool             | Target           |
-+======================+===================+==================+==================+
-| Stateless HTTP       | RPS / CPU         | HPA              | 50-60% CPU       |
-+----------------------+-------------------+------------------+------------------+
-| I/O-bound API        | p99 latency       | HPA + Prometheus | p95 = 50% of SLO |
-+----------------------+-------------------+------------------+------------------+
-| Message consumer     | queue depth / lag | KEDA             | ~30s of work     |
-+----------------------+-------------------+------------------+------------------+
-| Stateful / singleton | historical usage  | VPA (recommend)  | n/a              |
-+----------------------+-------------------+------------------+------------------+
-  Non-negotiables: minReplicas >= 2 (no single point of failure at scale-in); a
-  PodDisruptionBudget so the HPA/drains cannot evict every pod at once; right-size requests before
-  setting targets.
-
-6.12  HOW TO READ THE 'BASIS' LINE ON EACH FINDING
-
-  Every finding declares how the tool knows what it claims, so a guess never reads like a
-  measurement: OBSERVED = read directly from your files (stated as fact); DERIVED = arithmetic on
-  your values using the stated model and estimated non-heap constants (re-check with measured
-  numbers); ASSUMED = the tool could NOT see the truth and fell back to a guess - it prints an
-  'Assumes:' line, is flagged in the fix-first list, and (if CRITICAL) is capped at HIGH's score
-  weight so the tool's own uncertainty can never sink your grade. When in doubt, act on OBSERVED
-  first and verify ASSUMED before touching anything.
-
-6.13  GOLDEN RULES
-
-  1. The HPA divides by requests: requests ARE your scaling policy.
-  2. The kernel sums everything: budget the whole JVM, not the heap.
-  3. Kubernetes restarts what dies: make the JVM die on OOM, cleanly on SIGTERM.
-  4. Never scale a JVM on memory utilization.
-  5. Anything mutable ('latest', unpinned bases, helm-managed replicas under an HPA) will
-  eventually mutate mid-incident.
-  6. Scale up fast, scale down slow; never run HPA and VPA on the same resource.
+----------------------------------------------------------------------------------------------------
+[resolve-names] Get the real object names for the commands above
+----------------------------------------------------------------------------------------------------
+    Gap  : In static mode, object names shown are template placeholders (e.g.
+    `<orders.fullname>`), not the deployed names.
+    Run  :
+        $ helm template <release> <chart-dir> | grep -E '^kind:|^  name:'
+        $ # after install:  helm get manifest <release> -n <namespace>
+    Read : Render the chart (or read the live release) to get the concrete Deployment/HPA names
+    and drop them into the `kubectl` commands above.
 
 
 ====================================================================================================

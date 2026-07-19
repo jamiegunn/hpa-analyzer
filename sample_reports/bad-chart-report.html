@@ -1,0 +1,756 @@
+<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'>
+<title>hpa-analyzer report - legacy-payments</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--muted:#5f6368;--line:#e0e0e0;--card:#fafafa}
+@media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e6e6e6;--muted:#9aa0a6;--line:#2c2f36;--card:#1e2127}}
+*{box-sizing:border-box}
+body{margin:0;font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+header{display:flex;gap:20px;align-items:center;padding:20px 28px;border-bottom:1px solid var(--line)}
+.grade{min-width:96px;height:96px;border-radius:14px;color:#fff;display:flex;flex-direction:column;
+ align-items:center;justify-content:center;font-size:34px;font-weight:700}
+.grade span{font-size:13px;font-weight:500;opacity:.9}
+.hmeta h1{margin:0 0 4px;font-size:20px}
+.sub{color:var(--muted);font-size:13px}
+.counts{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap}
+.pill,.sev,.basis{color:#fff;border-radius:10px;padding:2px 9px;font-size:12px;font-weight:600}
+.controls{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);
+ padding:10px 28px;display:flex;gap:16px;align-items:center}
+#filter{flex:1;max-width:520px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;
+ background:var(--card);color:var(--fg)}
+.toc{padding:10px 28px;display:flex;gap:14px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+.toc a{color:#1f6feb;text-decoration:none;font-size:14px}
+section{padding:20px 28px;border-bottom:1px solid var(--line)}
+h2{font-size:17px;margin:0 0 12px}
+.fixfirst li{margin:4px 0}
+.fixfirst a{color:#1f6feb;text-decoration:none}
+.warn,.warn{color:#c25e00}.warn{font-size:12px;font-weight:600}
+.card{background:var(--card);border-radius:10px;padding:0 14px 12px;margin:12px 0;border:1px solid var(--line)}
+.cardhead{border-left:5px solid;padding:10px 12px;margin:0 -14px 8px;border-radius:10px 10px 0 0;
+ display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cat{color:var(--muted);font-size:12px;margin-left:auto}
+.card p{margin:6px 0}
+.fix{color:#1a7f37}.math{font-family:ui-monospace,monospace;font-size:13px;color:var(--muted)}
+.assumes{color:#8a6d00}
+.note{color:var(--muted);font-size:13px}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:8px 0}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}
+th{background:var(--card)}
+details{margin:8px 0;border:1px solid var(--line);border-radius:8px;padding:6px 12px;background:var(--card)}
+summary{cursor:pointer;font-weight:600}
+pre{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;
+ font:12px/1.45 ui-monospace,monospace}
+pre.edu{white-space:pre-wrap}
+code{font-family:ui-monospace,monospace;font-size:12px}
+.hidden{display:none}
+.verdict{font-size:14px}
+</style>
+</head><body>
+<header>
+<div class=grade style='background:#b3261e'>F<span>46/100</span></div>
+<div class=hmeta>
+<h1>Helm / Kubernetes / JVM quality report</h1>
+<div class=sub>legacy-payments v1.0 &middot; mode: static &middot; hpa-analyzer v1.0.0 &middot; 2026-07-19 04:26</div>
+<div class=counts>
+<span class=pill style='background:#b3261e'>11 critical</span>
+<span class=pill style='background:#c25e00'>11 high</span>
+<span class=pill style='background:#8a6d00'>14 medium</span>
+<span class=pill style='background:#1f5fa8'>16 low</span>
+<span class=pill style='background:#5f6368'>8 info</span>
+</div></div></header>
+<div class=controls>
+<input id=filter placeholder='filter findings by text…' oninput='ff()'>
+<label><input type=checkbox id=hideinfo onchange='ff()'> hide LOW/INFO</label>
+</div>
+<nav class=toc>
+<a href=#summary>Summary</a> <a href=#coverage>Coverage</a> <a href=#scorecard>Scorecard</a> <a href=#findings>Findings</a> <a href=#proofs>Proofs</a> <a href=#verify>Verify on cluster</a> <a href=#education>Education</a> <a href=#methodology>Methodology</a>
+</nav>
+<section id=summary><h2>Fix these first</h2>
+<ol class=fixfirst>
+<li><a href=#HP004><b>HP004</b> HPA minReplicas &gt; maxReplicas (invalid)</a> <code>templates/hpa.yaml</code></li>
+<li><a href=#HP025><b>HP025</b> HPA scales on memory for a JVM workload</a> <span class=warn>ASSUMED - verify</span></li>
+<li><a href=#HP050><b>HP050</b> Deployment sets spec.replicas while an HPA manages it</a> <code>templates/deployment.yaml</code></li>
+<li><a href=#RS002><b>RS002</b> Memory quantity uses &#x27;m&#x27; (MILLI-bytes)</a> <code>values.yaml</code></li>
+<li><a href=#RS006><b>RS006</b> CPU limit below CPU request (invalid)</a> <code>templates/deployment.yaml</code></li>
+<li><a href=#JV011><b>JV011</b> Java 8u151: only experimental cgroup support</a> <code>Dockerfile</code></li>
+<li><a href=#XF001><b>XF001</b> Max heap &gt;= container memory limit</a> <code>templates/deployment.yaml</code> <span class=warn>ASSUMED - verify</span></li>
+<li><a href=#XF003><b>XF003</b> JVM cannot see the container memory limit</a> <code>Dockerfile</code></li>
+</ol>
+</section>
+<section id=coverage><h2>Analysis coverage</h2>
+<p class=note>Findings only come from files that were analyzed. Anything below marked failed/skipped/unknown produced no findings &mdash; missing coverage, not a clean bill of health.</p>
+<table><thead><tr><th>Input</th><th>Coverage</th></tr></thead><tbody><tr><td>values.yaml</td><td>base values - used for primary analysis</td></tr><tr><td>values-prod.yaml</td><td>overlay values - analyzed as a separate variant</td></tr><tr><td>templates/deployment.yaml</td><td>statically parsed (1 object(s))</td></tr><tr><td>templates/hpa.yaml</td><td>statically parsed (1 object(s))</td></tr><tr><td>templates/service.yaml</td><td>statically parsed (1 object(s))</td></tr><tr><td>Dockerfile</td><td>parsed (Java 8u151 detected)</td></tr><tr><td>values-prod.yaml</td><td>variant analyzed - 4 additional finding(s) vs base values</td></tr></tbody></table>
+</section>
+<section id=scorecard><h2>Scorecard</h2>
+<table><thead><tr><th>Category</th><th>Score</th><th>Grade</th><th>Weight</th><th>C/H/M/L</th></tr></thead><tbody><tr><td>Helm Chart Structure &amp; Hygiene</td><td>49.0</td><td>F</td><td>4</td><td>2H, 2M, 5L</td></tr><tr><td>Kubernetes Templates &amp; API Versions</td><td>35.0</td><td>F</td><td>5</td><td>2C, 1M, 3L</td></tr><tr><td>Resource Requests &amp; Limits</td><td>32.0</td><td>F</td><td>15</td><td>2C, 1H, 1M</td></tr><tr><td>Horizontal Pod Autoscaling</td><td>20.0</td><td>F</td><td>15</td><td>3C, 1H, 2L</td></tr><tr><td>Availability &amp; Disruption Tolerance</td><td>79.0</td><td>C+</td><td>8</td><td>3M, 1L</td></tr><tr><td>Health Probes &amp; Lifecycle</td><td>70.0</td><td>C-</td><td>10</td><td>1H, 3M</td></tr><tr><td>Dockerfile Quality</td><td>66.0</td><td>D</td><td>8</td><td>1C, 1M, 1L</td></tr><tr><td>Java / JVM Container Fitness</td><td>21.0</td><td>F</td><td>14</td><td>1C, 3H, 2M, 2L</td></tr><tr><td>Security Posture</td><td>52.0</td><td>F</td><td>7</td><td>3H, 1M, 2L</td></tr><tr><td>Cross-File Consistency (Chart &lt;-&gt; JVM)</td><td>63.0</td><td>D</td><td>14</td><td>2C</td></tr></tbody></table>
+</section>
+<section id=findings><h2>Findings</h2>
+<div class='card ' id=HP004 data-text='hp004 hpa minreplicas &gt; maxreplicas (invalid) [with values overlay values-prod.yaml] hpa &#x27;release-name-payments&#x27;: minreplicas=25 &gt; maxreplicas=20. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>HP004</b> HPA minReplicas &gt; maxReplicas (invalid) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Horizontal Pod Autoscaling &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> [with values overlay values-prod.yaml] HPA &#x27;RELEASE-NAME-payments&#x27;: minReplicas=25 &gt; maxReplicas=20.</p>
+<p><b>Why:</b> Invalid object - the API server rejects it, so the workload has NO autoscaling and helm upgrade fails.</p>
+<p class=math><b>Math:</b> Constraint violated: 25 &lt;= 20 is false.</p>
+<p class=fix><b>Fix:</b> Make min &lt;= max.</p>
+</div>
+<div class='card ' id=HP025 data-text='hp025 hpa scales on memory for a jvm workload hpa &#x27;release-name-payments&#x27; includes a memory utilization/average-value metric (target 80%). '>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>HP025</b> HPA scales on memory for a JVM workload <span class="basis" style="background:#8a6d00">assumed</span><span class=cat>Horizontal Pod Autoscaling</span></div>
+<p class=assumes><b>Assumes:</b> the workload this HPA targets is the Java service (inferred from a single workload + a Java Dockerfile; the HPA&#x27;s target was not resolvable by name) &mdash; if wrong, this finding does not apply.</p>
+<p><b>Found:</b> HPA &#x27;RELEASE-NAME-payments&#x27; includes a memory utilization/average-value metric (target 80%).</p>
+<p><b>Why:</b> Memory-utilization HPA assumes memory falls when load falls. A JVM violates that assumption: committed heap stays at or near its high-water mark (most collectors return memory to the OS reluctantly or never), so measured &#x27;utilization&#x27; stays high after load drops. Result: the HPA scales UP under load but never scales back DOWN - it ratchets to maxReplicas and stays there.</p>
+<p class=math><b>Math:</b> Example with Xmx-bound JVM: after warmup RSS ~= heap_committed + off-heap ~= constant C. utilization = C/request stays &gt; 80% regardless of traffic =&gt; desired = ceil(current x util/80) &gt;= current forever (HPA tolerance +/-10%). Scale-down condition util &lt; 80% is unreachable.</p>
+<p class=fix><b>Fix:</b> Scale JVMs on CPU or on a load-proportional metric (requests/sec via external metrics, queue depth). If memory must gate scaling, use it only as a secondary metric and remember HPA takes the MAX of all metric proposals - memory will dominate.</p>
+</div>
+<div class='card ' id=HP050 data-text='hp050 deployment sets spec.replicas while an hpa manages it deployment &#x27;release-name-payments&#x27; sets spec.replicas=2 with no guard at all, and an hpa targets this workload. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>HP050</b> Deployment sets spec.replicas while an HPA manages it <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Horizontal Pod Autoscaling &middot; templates/deployment.yaml:7</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27; sets spec.replicas=2 with no guard at all, AND an HPA targets this workload.</p>
+<p><b>Why:</b> Helm and the HPA now fight over the same field. Every &#x27;helm upgrade&#x27; resets replicas to the template value; if the HPA had scaled to 10 and the template says 2, the deploy instantly kills 8 loaded pods mid-traffic. The HPA scales back up minutes later - after your users noticed.</p>
+<p class=math><b>Math:</b> Upgrade at peak: pods 10 -&gt; 2 (helm apply) =&gt; per-pod load x5 instantly; if pods saturate at ~2x, the service is down until HPA re-adds pods (&gt;= 1 metric period + JVM startup).</p>
+<p class=fix><b>Fix:</b> Omit spec.replicas entirely when autoscaling is enabled:
+        {{- if not .Values.autoscaling.enabled }}
+        replicas: {{ .Values.replicaCount }}
+        {{- end }}</p>
+</div>
+<div class='card ' id=RS002 data-text='rs002 memory quantity uses &#x27;m&#x27; (milli-bytes) deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: requests.memory = &#x27;512m&#x27;. values.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>RS002</b> Memory quantity uses &#x27;m&#x27; (MILLI-bytes) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Resource Requests &amp; Limits &middot; values.yaml:15</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: requests.memory = &#x27;512m&#x27;.</p>
+<p><b>Why:</b> Lowercase &#x27;m&#x27; is a legal Kubernetes suffix meaning 1/1000 of a byte. &#x27;512m&#x27; is 0.512 BYTES, not 512 MiB. As a request it schedules the pod as if it needs nothing; as a limit the container is OOM-killed on its first allocation.</p>
+<p class=math><b>Math:</b> &#x27;512m&#x27; = 0.512 bytes; &#x27;512Mi&#x27; = 536,870,912 bytes - a factor of 1000 x 1024^2 ~= 1.05 billion.</p>
+<p class=fix><b>Fix:</b> Use &#x27;512Mi&#x27;.</p>
+</div>
+<div class='card ' id=RS006 data-text='rs006 cpu limit below cpu request (invalid) [with values overlay values-prod.yaml] deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: requests.cpu=2 &gt; limits.cpu=1. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>RS006</b> CPU limit below CPU request (invalid) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Resource Requests &amp; Limits &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> [with values overlay values-prod.yaml] Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: requests.cpu=2 &gt; limits.cpu=1.</p>
+<p><b>Why:</b> Kubernetes requires limit &gt;= request; the API server rejects this pod spec and the Deployment can never roll out.</p>
+<p class=math><b>Math:</b> 1 core (limit) &lt; 2 cores (request).</p>
+<p class=fix><b>Fix:</b> Raise the limit or lower the request.</p>
+</div>
+<div class='card ' id=JV011 data-text='jv011 java 8u151: only experimental cgroup support 8u131-8u190 need -xx:+unlockexperimentalvmoptions -xx:+usecgroupmemorylimitforheap; flags are absent. dockerfile'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>JV011</b> Java 8u151: only experimental cgroup support <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> 8u131-8u190 need -XX:+UnlockExperimentalVMOptions -XX:+UseCGroupMemoryLimitForHeap; flags are ABSENT.</p>
+<p><b>Why:</b> Without the experimental flags applied, this JVM sizes its heap from host RAM exactly like pre-8u131. Even with them, CPU limits are ignored (GC/JIT thread pools sized for the node) and MaxRAMPercentage does not exist.</p>
+<p class=fix><b>Fix:</b> Upgrade to 8u191+ where -XX:+UseContainerSupport is on by default, then remove the experimental flags (they are removed in Java 11 and abort startup there).</p>
+</div>
+<div class='card ' id=XF001 data-text='xf001 max heap &gt;= container memory limit [with values overlay values-prod.yaml] deployment &#x27;release-name-payments&#x27; / container &#x27;payments&#x27;: effective max heap 4 gib (jvm cannot see the limit (8u151 without applied experimental cgroup flags); default 25% x assumed node ram 16 gib) vs limits.memory 4 gib. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>XF001</b> Max heap &gt;= container memory limit <span class="basis" style="background:#8a6d00">assumed</span><span class=cat>Cross-File Consistency (Chart &lt;-&gt; JVM) &middot; templates/deployment.yaml</span></div>
+<p class=assumes><b>Assumes:</b> the node has ~16 GiB RAM (used only because this JVM cannot see the container limit) &mdash; if wrong, this finding does not apply.</p>
+<p><b>Found:</b> [with values overlay values-prod.yaml] Deployment &#x27;RELEASE-NAME-payments&#x27; / container &#x27;payments&#x27;: effective max heap 4 GiB (JVM CANNOT see the limit (8u151 without applied experimental cgroup flags); default 25% x assumed node RAM 16 GiB) vs limits.memory 4 GiB.</p>
+<p><b>Why:</b> The heap ALONE meets or exceeds the limit before counting metaspace, stacks and buffers. The kernel will OOM-kill the container (exit 137, no Java stack trace, no heap dump) as soon as the heap fills - typically under first real load.</p>
+<p class=math><b>Math:</b> H(4 GiB) &gt;= L(4 GiB); required: H + ~404 MiB (non-heap) &lt;= L.</p>
+<p class=fix><b>Fix:</b> Heap &lt;= 50-75% of the limit. Either raise limits.memory or lower -Xmx/MaxRAMPercentage.</p>
+</div>
+<div class='card ' id=XF003 data-text='xf003 jvm cannot see the container memory limit [with values overlay values-prod.yaml] 8u151 without applied experimental cgroup flags; the chart sets limits.memory=4 gib but the jvm sizes itself from the node. dockerfile'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>XF003</b> JVM cannot see the container memory limit <span class="basis" style="background:#1f5fa8">derived</span><span class=cat>Cross-File Consistency (Chart &lt;-&gt; JVM) &middot; Dockerfile</span></div>
+<p><b>Found:</b> [with values overlay values-prod.yaml] 8u151 without applied experimental cgroup flags; the chart sets limits.memory=4 GiB but the JVM sizes itself from the node.</p>
+<p><b>Why:</b> Limits only constrain (kill); they do not inform an unaware JVM. The JVM aims for a heap derived from NODE RAM and is OOM-killed at the container limit it never knew about.</p>
+<p class=math><b>Math:</b> Default heap = node_RAM/4 = 4 GiB (assumed 16 GiB node) vs limit 4 GiB =&gt; kill at 100% of the JVM&#x27;s target.</p>
+<p class=fix><b>Fix:</b> Upgrade the JDK (8u191+/11.0.16+/17+) or set explicit -Xmx.</p>
+</div>
+<div class='card ' id=DF013 data-text='df013 java_opts is defined but never applied env sets java_opts, but the container&#x27;s launch command never references it and the jvm does not read it by itself. inert flags: -dspring.profiles.active=prod -xx:maxpermsize=256m -xms512m -xmx3g. dockerfile'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>DF013</b> JAVA_OPTS is defined but NEVER applied <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Dockerfile Quality &middot; Dockerfile</span></div>
+<p><b>Found:</b> ENV sets JAVA_OPTS, but the container&#x27;s launch command never references it and the JVM does not read it by itself. Inert flags: -Dspring.profiles.active=prod -XX:MaxPermSize=256m -Xms512m -Xmx3g.</p>
+<p><b>Why:</b> JAVA_OPTS is only a convention - nothing reads it automatically. Every flag in it (heap sizing, GC, container tuning) is silently NOT in effect; the JVM runs on pure defaults while everyone believes it is tuned. All other findings in this report judge the options the JVM actually receives.</p>
+<p class=fix><b>Fix:</b> Either switch to JAVA_TOOL_OPTIONS (the JVM itself reads that env var) or expand it via &#x27;ENTRYPOINT [&quot;sh&quot;,&quot;-c&quot;,&quot;exec java $JAVA_OPTS -jar app.jar&quot;]&#x27;.</p>
+</div>
+<div class='card ' id=TP010 data-text='tp010 deprecated/removed apiversion for deployment deployment &#x27;release-name-payments&#x27; uses apiversion apps/v1beta2, removed in kubernetes 1.16. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>TP010</b> Deprecated/removed apiVersion for Deployment <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/deployment.yaml:1</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27; uses apiVersion apps/v1beta2, removed in Kubernetes 1.16.</p>
+<p><b>Why:</b> On clusters &gt;= 1.16 the API server rejects this object outright: helm upgrade fails and the release can get stuck (existing release manifests reference dead APIs).</p>
+<p class=fix><b>Fix:</b> Move to apps/v1 and adjust the spec to the new schema.</p>
+</div>
+<div class='card ' id=TP010 data-text='tp010 deprecated/removed apiversion for horizontalpodautoscaler horizontalpodautoscaler &#x27;release-name-payments&#x27; uses apiversion autoscaling/v2beta1, removed in kubernetes 1.25. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#b3261e'><span class=sev style='background:#b3261e'>CRITICAL</span><b>TP010</b> Deprecated/removed apiVersion for HorizontalPodAutoscaler <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/hpa.yaml:2</span></div>
+<p><b>Found:</b> HorizontalPodAutoscaler &#x27;RELEASE-NAME-payments&#x27; uses apiVersion autoscaling/v2beta1, removed in Kubernetes 1.25.</p>
+<p><b>Why:</b> On clusters &gt;= 1.25 the API server rejects this object outright: helm upgrade fails and the release can get stuck (existing release manifests reference dead APIs).</p>
+<p class=fix><b>Fix:</b> Move to autoscaling/v2 and adjust the spec to the new schema.</p>
+</div>
+<div class='card ' id=HP023 data-text='hp023 hpa cpu target 95% leaves no scaling headroom hpa &#x27;release-name-payments&#x27; targets averageutilization=95%. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>HP023</b> HPA CPU target 95% leaves no scaling headroom <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Horizontal Pod Autoscaling &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> HPA &#x27;RELEASE-NAME-payments&#x27; targets averageUtilization=95%.</p>
+<p><b>Why:</b> Scaling is not instantaneous: metrics lag (15-60s), pods schedule, images pull, and a JVM warms up. During that window existing pods must absorb the excess ABOVE the target. At 95% the buffer before saturation is only 5%.</p>
+<p class=math><b>Math:</b> Absorbable load growth while scaling = 100/95 - 1 = 5%. With a 90s JVM startup, load growing faster than 5% per ~2 min saturates pods before help arrives.</p>
+<p class=fix><b>Fix:</b> Target 60-75% for JVM services; lower if startup is slow.</p>
+</div>
+<div class='card ' id=RS005 data-text='rs005 no memory limit deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: limits.memory is not set. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>RS005</b> No memory limit <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Resource Requests &amp; Limits &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: limits.memory is not set.</p>
+<p><b>Why:</b> Memory is incompressible: when a node runs out, the kernel OOM-killer picks victims. An unlimited JVM with a native leak or unbounded -Xmx can evict every other pod on the node. For JVM workloads a memory limit is the container&#x27;s contract with the JVM&#x27;s container-awareness (MaxRAMPercentage is computed FROM it).</p>
+<p class=fix><b>Fix:</b> Set limits.memory (commonly = requests.memory for JVMs, giving Guaranteed-style memory QoS).</p>
+</div>
+<div class='card ' id=JV001 data-text='jv001 java 8 runtime base image openjdk:8u151-jdk is java 8 (update 151). dockerfile'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>JV001</b> Java 8 runtime <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> Base image openjdk:8u151-jdk is Java 8 (update 151).</p>
+<p><b>Why:</b> Java 8 (2014) predates containers: its container support is a chain of backports with sharp edges (see the related findings), it lacks modern collectors (G1 improvements, ZGC/Shenandoah), compact strings (-10-20% heap for string-heavy apps), TLS 1.3 defaults and years of JIT gains. Every JVM&lt;-&gt;container problem this report checks for is worse on 8.</p>
+<p class=fix><b>Fix:</b> Plan a migration to 17 or 21 (LTS). Typical first step: run on a current 8 update (8u392+) while testing 17.</p>
+</div>
+<div class='card ' id=JV013 data-text='jv013 java 8u151: blind to cgroup v2 nodes cgroup v2 support reached java 8 at 8u372. dockerfile'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>JV013</b> Java 8u151: blind to cgroup v2 nodes <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> cgroup v2 support reached Java 8 at 8u372.</p>
+<p><b>Why:</b> Modern node OSes (Ubuntu &gt;= 22.04, EKS AL2023, GKE COS, anything K8s ~1.25+) default to cgroup v2. On such nodes this JVM finds no cgroup v1 files, concludes it is NOT in a container, and reverts to host-RAM/host-CPU sizing - re-introducing the OOM-kill behavior of pre-container-aware JVMs even though UseContainerSupport is &#x27;on&#x27;.</p>
+<p class=fix><b>Fix:</b> Upgrade to 8u372+ / 11.0.16+ / 17+, or pin explicit -Xmx and -XX:ActiveProcessorCount as a stopgap.</p>
+</div>
+<div class='card ' id=JV021 data-text='jv021 no jvm heap sizing is actually applied neither -xmx nor -xx:maxrampercentage/-xx:maxramfraction is applied. heap sizing flags do exist in an env var, but nothing applies them (see df013) - the jvm runs on pure defaults. dockerfile'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>JV021</b> No JVM heap sizing is actually applied <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> Neither -Xmx nor -XX:MaxRAMPercentage/-XX:MaxRAMFraction is applied. Heap sizing flags DO exist in an env var, but nothing applies them (see DF013) - the JVM runs on pure defaults.</p>
+<p><b>Why:</b> Without an applied heap bound the JVM uses its ergonomic default: 25% of the memory it can see. Two consequences: (a) most of the container memory you pay for is never used for heap, and (b) if the JVM cannot see the limit (old JDK, cgroup v2 mismatch - see other findings) that 25% is 25% of the NODE.</p>
+<p class=math><b>Math:</b> Default heap = 0.25 x visible_RAM. Container limit 1 GiB =&gt; heap 256 MiB (why so small?). No visible limit on a 64 GiB node =&gt; heap 16 GiB (why so large?) -&gt; OOMKill.</p>
+<p class=fix><b>Fix:</b> Apply -XX:MaxRAMPercentage=50-75 (container-aware JDKs) or an explicit -Xmx ~ 50-75% of limits.memory, via a mechanism that actually reaches the JVM (JAVA_TOOL_OPTIONS, or exec-form expansion).</p>
+</div>
+<div class='card ' id=PB004 data-text='pb004 liveness can kill a still-starting jvm deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: no startupprobe and liveness initialdelayseconds=5s. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>PB004</b> Liveness can kill a still-starting JVM <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Health Probes &amp; Lifecycle &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: no startupProbe and liveness initialDelaySeconds=5s.</p>
+<p><b>Why:</b> JVM apps routinely need 30-120s+ to start (class loading, JIT, Spring context, connection pools) - especially with small CPU requests. If liveness fires before the app can answer, kubelet kills it, the restart is even slower (cold cache + CPU contention), and the pod enters CrashLoopBackOff without ever being unhealthy.</p>
+<p class=math><b>Math:</b> Worst-case time-to-kill = initialDelay(5) + period(5) x failureThreshold(3) = 20s. A JVM needing more than 20s to start NEVER becomes live.</p>
+<p class=fix><b>Fix:</b> Add a startupProbe (e.g. periodSeconds=5, failureThreshold=36 -&gt; up to 180s grace) - liveness only begins after startup succeeds.</p>
+</div>
+<div class='card ' id=DF020 data-text='df020 container runs as root (no user instruction) no non-root user is set in the final stage. dockerfile'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>DF020</b> Container runs as root (no USER instruction) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; Dockerfile</span></div>
+<p><b>Found:</b> No non-root USER is set in the final stage.</p>
+<p><b>Why:</b> Defense in depth: a compromised JVM running as root can write anywhere in the container and is one kernel bug from the node. Pod Security &#x27;Restricted&#x27; will refuse the pod unless runAsNonRoot is satisfied - and an image built for root often fails when forced non-root at deploy time.</p>
+<p class=fix><b>Fix:</b> Create a user in the image and set USER (most Temurin images: no default user - add one).</p>
+</div>
+<div class='card ' id=DF021 data-text='df021 possible secret baked into image line 4: env db_password=changeme123 dockerfile'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>DF021</b> Possible secret baked into image <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; Dockerfile:4</span></div>
+<p><b>Found:</b> Line 4: ENV DB_PASSWORD=changeme123</p>
+<p><b>Why:</b> ENV/ARG values are stored in image layers and visible via &#x27;docker history&#x27; to anyone who can pull the image.</p>
+<p class=fix><b>Fix:</b> Inject secrets at runtime (K8s Secrets -&gt; env/volume), never at build time.</p>
+</div>
+<div class='card ' id=SC001 data-text='sc001 container may run as root deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: neither runasnonroot: true nor a non-zero runasuser is set. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>SC001</b> Container may run as root <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: neither runAsNonRoot: true nor a non-zero runAsUser is set.</p>
+<p><b>Why:</b> A container escape from a root process is a node compromise. &#x27;Restricted&#x27; Pod Security Standard requires runAsNonRoot; clusters enforcing it will refuse this pod.</p>
+<p class=fix><b>Fix:</b> Set securityContext.runAsNonRoot: true (+ runAsUser) and add USER in the Dockerfile.</p>
+</div>
+<div class='card ' id=PA001 data-text='pa001 parse problem values.yaml: duplicate key &#x27;resources&#x27; at line 27 (later value silently wins) values.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>PA001</b> Parse problem <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; values.yaml</span></div>
+<p><b>Found:</b> values.yaml: duplicate key &#x27;resources&#x27; at line 27 (later value silently wins)</p>
+<p><b>Why:</b> Files that cannot be parsed (or contain duplicate keys, where the last value silently wins) hide their real configuration from both this analyzer and from humans reviewing the chart.</p>
+<p class=fix><b>Fix:</b> Fix the syntax; run &#x27;helm template&#x27; and a YAML linter in CI.</p>
+</div>
+<div class='card ' id=VA002 data-text='va002 image tag is &#x27;latest&#x27; or empty image.tag is &#x27;latest&#x27;. values.yaml'>
+<div class=cardhead style='border-color:#c25e00'><span class=sev style='background:#c25e00'>HIGH</span><b>VA002</b> Image tag is &#x27;latest&#x27; or empty <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; values.yaml</span></div>
+<p><b>Found:</b> image.tag is &#x27;latest&#x27;.</p>
+<p><b>Why:</b> &#x27;latest&#x27; is mutable: two pods of the same ReplicaSet can run different builds after a node pulls a newer image; rollbacks become impossible because the tag no longer identifies a build. With imagePullPolicy:Always a registry outage blocks pod restarts.</p>
+<p class=fix><b>Fix:</b> Pin an immutable tag (version or git SHA), ideally defaulting to .Chart.AppVersion; use digests for maximum reproducibility.</p>
+</div>
+<div class='card ' id=RS010 data-text='rs010 cpu request likely too small for a jvm deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: requests.cpu=100m. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>RS010</b> CPU request likely too small for a JVM <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Resource Requests &amp; Limits &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: requests.cpu=100m.</p>
+<p><b>Why:</b> JVM startup (class loading + JIT) is CPU-hungry. Under node contention a pod is guaranteed only its request; at 100m a Spring-style app can take minutes to become ready and trip liveness probes.</p>
+<p class=fix><b>Fix:</b> Request &gt;= 250-500m for JVM services; consider a startupProbe.</p>
+</div>
+<div class='card ' id=JV017 data-text='jv017 permgen flag on java 8+ (ignored) -xx:maxpermsize=256m - permgen was removed in java 8. [currently inert - defined but never applied; see df013] dockerfile'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>JV017</b> PermGen flag on Java 8+ (ignored) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> -XX:MaxPermSize=256m - PermGen was removed in Java 8. [currently INERT - defined but never applied; see DF013]</p>
+<p><b>Why:</b> The flag is silently ignored (with a warning). Whoever set it believes class metadata is capped; it is NOT - Metaspace grows unbounded unless MaxMetaspaceSize is set, eating into the container limit.</p>
+<p class=fix><b>Fix:</b> Replace with -XX:MaxMetaspaceSize=... if a cap is desired.</p>
+</div>
+<div class='card ' id=JV026 data-text='jv026 no applied -xx:+exitonoutofmemoryerror the flag is absent from the options the jvm will actually receive. dockerfile'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>JV026</b> No applied -XX:+ExitOnOutOfMemoryError <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> The flag is absent from the options the JVM will actually receive.</p>
+<p><b>Why:</b> After a heap OutOfMemoryError a JVM often limps on with dead threads and corrupted state - alive enough to pass a TCP liveness probe, broken enough to fail every request. Kubernetes can only heal what dies.</p>
+<p class=fix><b>Fix:</b> Add -XX:+ExitOnOutOfMemoryError (and optionally -XX:+HeapDumpOnOutOfMemoryError with a mounted dump path).</p>
+</div>
+<div class='card ' id=LC001 data-text='lc001 short terminationgraceperiodseconds deployment &#x27;release-name-payments&#x27;: terminationgraceperiodseconds=10s. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>LC001</b> Short terminationGracePeriodSeconds <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Health Probes &amp; Lifecycle &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;: terminationGracePeriodSeconds=10s.</p>
+<p><b>Why:</b> On SIGTERM a JVM must stop accepting traffic, drain in-flight requests, close pools and (often) deregister from discovery. 10s is rarely enough; kubelet then SIGKILLs mid-request.</p>
+<p class=fix><b>Fix:</b> Use &gt;= 30s (default) and ensure the app handles SIGTERM (see Dockerfile ENTRYPOINT findings).</p>
+</div>
+<div class='card ' id=PB003 data-text='pb003 liveness and readiness probes are identical deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: same endpoint and same timings. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>PB003</b> Liveness and readiness probes are identical <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Health Probes &amp; Lifecycle &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: same endpoint AND same timings.</p>
+<p><b>Why:</b> Readiness failure should shed traffic (recoverable); liveness failure RESTARTS the pod. Identical probes turn every transient slowdown (GC pause, downstream hiccup) into a restart storm - and restarts of a slow-starting JVM amplify the outage.</p>
+<p class=fix><b>Fix:</b> Make liveness strictly more tolerant: longer period, higher failureThreshold, and an endpoint that does NOT check downstream dependencies.</p>
+</div>
+<div class='card ' id=PB005 data-text='pb005 probe timeoutseconds = 1 (default) is fragile for jvms deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: livenessprobe timeoutseconds=1s. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>PB005</b> Probe timeoutSeconds = 1 (default) is fragile for JVMs <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Health Probes &amp; Lifecycle &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: livenessProbe timeoutSeconds=1s.</p>
+<p><b>Why:</b> A single stop-the-world GC pause &gt; 1s fails the probe. Three in a row (default failureThreshold=3) restarts a healthy pod under exactly the load that caused the GC pressure - positive feedback into an outage.</p>
+<p class=fix><b>Fix:</b> Set timeoutSeconds to 3-5s for JVM services.</p>
+</div>
+<div class='card ' id=AV002 data-text='av002 deployment strategy recreate deployment &#x27;release-name-payments&#x27;: strategy.type=recreate. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>AV002</b> Deployment strategy Recreate <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Availability &amp; Disruption Tolerance &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;: strategy.type=Recreate.</p>
+<p><b>Why:</b> Recreate deletes ALL old pods before starting new ones - guaranteed downtime on every deploy, magnified by JVM startup time.</p>
+<p class=fix><b>Fix:</b> Use RollingUpdate unless the app truly cannot run two versions concurrently.</p>
+</div>
+<div class='card ' id=AV010 data-text='av010 no poddisruptionbudget chart ships deployments/statefulsets but no pdb. '>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>AV010</b> No PodDisruptionBudget <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Availability &amp; Disruption Tolerance</span></div>
+<p><b>Found:</b> Chart ships Deployments/StatefulSets but no PDB.</p>
+<p><b>Why:</b> Without a PDB, voluntary disruptions (node drains, cluster upgrades, spot reclaims via drain) may evict ALL replicas simultaneously. With an HPA this is worse: cluster-autoscaler consolidation happily drains nodes hosting every replica.</p>
+<p class=fix><b>Fix:</b> Add a PDB with maxUnavailable: 1 (or 25%) selecting the same pods.</p>
+</div>
+<div class='card ' id=DF022 data-text='df022 add from url line 6: add https://internal.example.com/tools/agent.jar /opt/agent.jar dockerfile'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>DF022</b> ADD from URL <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Dockerfile Quality &middot; Dockerfile:6</span></div>
+<p><b>Found:</b> Line 6: ADD https://internal.example.com/tools/agent.jar /opt/agent.jar</p>
+<p><b>Why:</b> ADD-from-URL is unverified (no checksum), uncached and non-reproducible.</p>
+<p class=fix><b>Fix:</b> Use curl with checksum verification in a RUN, or COPY a vendored artifact.</p>
+</div>
+<div class='card ' id=HP006 data-text='hp006 hpa minreplicas=1 hpa &#x27;release-name-payments&#x27;: minreplicas=1. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>HP006</b> HPA minReplicas=1 <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Availability &amp; Disruption Tolerance &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> HPA &#x27;RELEASE-NAME-payments&#x27;: minReplicas=1.</p>
+<p><b>Why:</b> At quiet times the HPA scales to a single pod: every voluntary disruption or crash at min-scale is then a full outage, and recovery requires a cold JVM start under rising load.</p>
+<p class=fix><b>Fix:</b> minReplicas: 2 for anything user-facing.</p>
+</div>
+<div class='card ' id=SC002 data-text='sc002 allowprivilegeescalation not disabled deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: allowprivilegeescalation is not set to false. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>SC002</b> allowPrivilegeEscalation not disabled <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: allowPrivilegeEscalation is not set to false.</p>
+<p><b>Why:</b> Defaults to true; permits setuid binaries to gain privileges. Required false by the Restricted PSS profile.</p>
+<p class=fix><b>Fix:</b> Set securityContext.allowPrivilegeEscalation: false.</p>
+</div>
+<div class='card ' id=TP002 data-text='tp002 hardcoded namespace in template namespace: production is hardcoded. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>TP002</b> Hardcoded namespace in template <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/deployment.yaml:5</span></div>
+<p><b>Found:</b> namespace: production is hardcoded.</p>
+<p><b>Why:</b> Hardcoding the namespace breaks &#x27;helm install -n &lt;ns&gt;&#x27; and makes multi-env installs collide.</p>
+<p class=fix><b>Fix:</b> Omit metadata.namespace (Helm applies the release namespace) or use {{ .Release.Namespace }}.</p>
+</div>
+<div class='card ' id=CH002 data-text='ch002 chart apiversion v1 (helm 2 era) chart.yaml declares apiversion: v1. chart.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>CH002</b> Chart apiVersion v1 (Helm 2 era) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> Chart.yaml declares apiVersion: v1.</p>
+<p><b>Why:</b> apiVersion v1 targets Helm 2, which reached end of life in Nov 2020 (no security fixes). v2 charts support dependencies in Chart.yaml and library charts.</p>
+<p class=fix><b>Fix:</b> Set apiVersion: v2 and manage dependencies via the &#x27;dependencies&#x27; key instead of requirements.yaml.</p>
+</div>
+<div class='card ' id=CH006 data-text='ch006 chart version is not semver version: 1.0 does not match major.minor.patch. chart.yaml'>
+<div class=cardhead style='border-color:#8a6d00'><span class=sev style='background:#8a6d00'>MEDIUM</span><b>CH006</b> Chart version is not SemVer <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> version: 1.0 does not match MAJOR.MINOR.PATCH.</p>
+<p><b>Why:</b> helm package/repo tooling assumes SemVer; sorting and constraint matching (e.g. in Chart dependencies) break otherwise.</p>
+<p class=fix><b>Fix:</b> Use a SemVer 2 version like 1.4.2.</p>
+</div>
+<div class='card lowinfo' id=HP007 data-text='hp007 very wide hpa range hpa &#x27;release-name-payments&#x27;: min=1, max=20 (20x). templates/hpa.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>HP007</b> Very wide HPA range <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Horizontal Pod Autoscaling &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> HPA &#x27;RELEASE-NAME-payments&#x27;: min=1, max=20 (20x).</p>
+<p><b>Why:</b> A 10x+ band usually means requests were never right-sized; check the cluster can actually schedule max pods (max x request &lt;= cluster headroom) or scaling silently stops at Pending pods.</p>
+<p class=fix><b>Fix:</b> Verify capacity: maxReplicas x cpu request and x memory request.</p>
+</div>
+<div class='card lowinfo' id=HP030 data-text='hp030 no hpa behavior block (defaults apply) hpa &#x27;release-name-payments&#x27; relies on default scaling behavior. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>HP030</b> No HPA behavior block (defaults apply) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Horizontal Pod Autoscaling &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> HPA &#x27;RELEASE-NAME-payments&#x27; relies on default scaling behavior.</p>
+<p><b>Why:</b> Defaults: scale-up may double pods every 15s (or +4 pods, whichever is larger) with 0s stabilization; scale-down waits 300s. For slow-starting JVMs an aggressive default scale-up adds many cold pods that all JIT-compile at once (CPU burst -&gt; even higher utilization -&gt; more scaling: a warmup storm).</p>
+<p class=fix><b>Fix:</b> Add behavior.scaleUp with a stabilizationWindowSeconds of 60-120s and/or policies limiting pods-per-minute; keep scale-down conservative.</p>
+</div>
+<div class='card lowinfo' id=JV024 data-text='jv024 xms != xmx in a container -xms 512 mib vs -xmx 3 gib. [currently inert - defined but never applied; see df013] dockerfile'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>JV024</b> Xms != Xmx in a container <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> -Xms 512 MiB vs -Xmx 3 GiB. [currently INERT - defined but never applied; see DF013]</p>
+<p><b>Why:</b> The pod&#x27;s memory REQUEST must cover Xmx anyway (the heap will get there under load and memory is rarely returned). Growing the heap in steps just adds early GC cycles and page-fault latency; you gain nothing you can bin-pack on.</p>
+<p class=fix><b>Fix:</b> Set Xms = Xmx (or AlwaysPreTouch for latency-critical pods).</p>
+</div>
+<div class='card lowinfo' id=JV027 data-text='jv027 gc not pinned - ergonomics may pick serialgc in-container java 8 with no applied collector flag. dockerfile'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>JV027</b> GC not pinned - ergonomics may pick SerialGC in-container <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Java / JVM Container Fitness &middot; Dockerfile</span></div>
+<p><b>Found:</b> Java 8 with no applied collector flag.</p>
+<p><b>Why:</b> JVM ergonomics picks the collector from visible CPUs/RAM: with &lt;2 CPUs or &lt;~1792 MiB visible, you get SerialGC - single-threaded, long pauses - and a CPU limit of 1000m means exactly that. Java 8&#x27;s default (Parallel) also differs from 9+ (G1): upgrades silently change GC behavior.</p>
+<p class=fix><b>Fix:</b> Pin the collector explicitly (-XX:+UseG1GC for most services).</p>
+</div>
+<div class='card lowinfo' id=AV003 data-text='av003 no pod anti-affinity / topology spread deployment &#x27;release-name-payments&#x27;: neither podantiaffinity nor topologyspreadconstraints set. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>AV003</b> No pod anti-affinity / topology spread <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Availability &amp; Disruption Tolerance &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;: neither podAntiAffinity nor topologySpreadConstraints set.</p>
+<p><b>Why:</b> Multiple replicas may all land on ONE node; a single node failure then behaves exactly like replicas=1. Scaling out via HPA without spreading also concentrates the new load.</p>
+<p class=fix><b>Fix:</b> Add topologySpreadConstraints on kubernetes.io/hostname (and zone) with maxSkew: 1.</p>
+</div>
+<div class='card lowinfo' id=DF004 data-text='df004 full jdk in final image (no multi-stage build) final image openjdk:8u151-jdk is a jdk and the dockerfile has a single stage. dockerfile'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>DF004</b> Full JDK in final image (no multi-stage build) <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Dockerfile Quality &middot; Dockerfile</span></div>
+<p><b>Found:</b> Final image openjdk:8u151-jdk is a JDK and the Dockerfile has a single stage.</p>
+<p><b>Why:</b> A JDK ships compilers and tools the service never uses: bigger attack surface, bigger pulls (slower cold starts - which matters when the HPA is adding pods under load).</p>
+<p class=fix><b>Fix:</b> Multi-stage: build with the JDK image, run on the matching -jre (or distroless/java) image.</p>
+</div>
+<div class='card lowinfo' id=SC003 data-text='sc003 linux capabilities not dropped deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: capabilities.drop does not include all. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>SC003</b> Linux capabilities not dropped <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: capabilities.drop does not include ALL.</p>
+<p><b>Why:</b> Default capability set includes NET_RAW etc.; a Java service needs none of them.</p>
+<p class=fix><b>Fix:</b> capabilities: { drop: [ALL] }.</p>
+</div>
+<div class='card lowinfo' id=SC004 data-text='sc004 root filesystem writable deployment &#x27;release-name-payments&#x27;, container &#x27;payments&#x27;: readonlyrootfilesystem not true. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>SC004</b> Root filesystem writable <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;, container &#x27;payments&#x27;: readOnlyRootFilesystem not true.</p>
+<p><b>Why:</b> Read-only rootfs blocks attackers dropping tools/persisting; JVMs typically only need /tmp (mount an emptyDir).</p>
+<p class=fix><b>Fix:</b> Set readOnlyRootFilesystem: true and mount emptyDir at /tmp (add -Djava.io.tmpdir if needed).</p>
+</div>
+<div class='card lowinfo' id=TP012 data-text='tp012 deployment has no labels at all deployment &#x27;release-name-payments&#x27; defines no metadata.labels. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>TP012</b> Deployment has no labels at all <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27; defines no metadata.labels.</p>
+<p><b>Why:</b> Unlabeled objects are invisible to selectors and monitoring.</p>
+<p class=fix><b>Fix:</b> Add the standard app.kubernetes.io/* label set.</p>
+</div>
+<div class='card lowinfo' id=TP012 data-text='tp012 horizontalpodautoscaler has no labels at all horizontalpodautoscaler &#x27;release-name-payments&#x27; defines no metadata.labels. templates/hpa.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>TP012</b> HorizontalPodAutoscaler has no labels at all <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/hpa.yaml</span></div>
+<p><b>Found:</b> HorizontalPodAutoscaler &#x27;RELEASE-NAME-payments&#x27; defines no metadata.labels.</p>
+<p><b>Why:</b> Unlabeled objects are invisible to selectors and monitoring.</p>
+<p class=fix><b>Fix:</b> Add the standard app.kubernetes.io/* label set.</p>
+</div>
+<div class='card lowinfo' id=TP012 data-text='tp012 service has no labels at all service &#x27;release-name-payments&#x27; defines no metadata.labels. templates/service.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>TP012</b> Service has no labels at all <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/service.yaml</span></div>
+<p><b>Found:</b> Service &#x27;RELEASE-NAME-payments&#x27; defines no metadata.labels.</p>
+<p><b>Why:</b> Unlabeled objects are invisible to selectors and monitoring.</p>
+<p class=fix><b>Fix:</b> Add the standard app.kubernetes.io/* label set.</p>
+</div>
+<div class='card lowinfo' id=CH007 data-text='ch007 no appversion in chart.yaml appversion is not set. chart.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>CH007</b> No appVersion in Chart.yaml <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> appVersion is not set.</p>
+<p><b>Why:</b> appVersion documents which application build the chart deploys and is the conventional default for the image tag (.Chart.AppVersion). Without it, image tags tend to drift to &#x27;latest&#x27;.</p>
+<p class=fix><b>Fix:</b> Set appVersion to the deployed application version and reference it as the default image tag.</p>
+</div>
+<div class='card lowinfo' id=CH008 data-text='ch008 no chart description description is not set. chart.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>CH008</b> No chart description <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> description is not set.</p>
+<p><b>Why:</b> Descriptions surface in &#x27;helm search&#x27; and chart repos; missing metadata makes the chart look unmaintained.</p>
+<p class=fix><b>Fix:</b> Add a one-line description.</p>
+</div>
+<div class='card lowinfo' id=CH010 data-text='ch010 no kubeversion constraint kubeversion is not set. chart.yaml'>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>CH010</b> No kubeVersion constraint <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> kubeVersion is not set.</p>
+<p><b>Why:</b> Without a kubeVersion constraint the chart will happily install onto clusters whose APIs it does not support (e.g. autoscaling/v2 requires Kubernetes &gt;= 1.23), failing at apply time instead of install time.</p>
+<p class=fix><b>Fix:</b> Add e.g. kubeVersion: &quot;&gt;=1.23.0-0&quot;.</p>
+</div>
+<div class='card lowinfo' id=CH021 data-text='ch021 no _helpers.tpl templates/_helpers.tpl not found. '>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>CH021</b> No _helpers.tpl <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene</span></div>
+<p><b>Found:</b> templates/_helpers.tpl not found.</p>
+<p><b>Why:</b> Name/label boilerplate gets duplicated per template without helpers, which is how label drift (and broken selectors) happens.</p>
+<p class=fix><b>Fix:</b> Add _helpers.tpl with &lt;chart&gt;.name, &lt;chart&gt;.fullname, &lt;chart&gt;.labels and &lt;chart&gt;.selectorLabels helpers.</p>
+</div>
+<div class='card lowinfo' id=CH023 data-text='ch023 no values.schema.json values.schema.json not found. '>
+<div class=cardhead style='border-color:#1f5fa8'><span class=sev style='background:#1f5fa8'>LOW</span><b>CH023</b> No values.schema.json <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene</span></div>
+<p><b>Found:</b> values.schema.json not found.</p>
+<p><b>Why:</b> Schema validation rejects typo&#x27;d or type-mismatched values at install time (e.g. memory: 512 instead of &#x27;512Mi&#x27;) - exactly the class of error that breaks resources/HPA silently.</p>
+<p class=fix><b>Fix:</b> Add values.schema.json (JSON Schema) covering at least resources and autoscaling blocks.</p>
+</div>
+<div class='card lowinfo' id=DF025 data-text='df025 no .dockerignore no .dockerignore found beside the dockerfile. dockerfile'>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>DF025</b> No .dockerignore <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Dockerfile Quality &middot; Dockerfile</span></div>
+<p><b>Found:</b> No .dockerignore found beside the Dockerfile.</p>
+<p><b>Why:</b> Build context ships .git, target/, node_modules - slow builds and accidental secret inclusion.</p>
+<p class=fix><b>Fix:</b> Add .dockerignore.</p>
+</div>
+<div class='card lowinfo' id=SC006 data-text='sc006 serviceaccount token automounted deployment &#x27;release-name-payments&#x27;: automountserviceaccounttoken not disabled and the chart defines no rbac of its own. templates/deployment.yaml'>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>SC006</b> ServiceAccount token automounted <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Security Posture &middot; templates/deployment.yaml</span></div>
+<p><b>Found:</b> Deployment &#x27;RELEASE-NAME-payments&#x27;: automountServiceAccountToken not disabled and the chart defines no RBAC of its own.</p>
+<p><b>Why:</b> Apps that never call the Kubernetes API should not carry API credentials in /var/run/secrets - it is free attack surface.</p>
+<p class=fix><b>Fix:</b> Set automountServiceAccountToken: false on the pod spec (or SA).</p>
+</div>
+<div class='card lowinfo' id=TP003 data-text='tp003 todo marker in template found &#x27;todo&#x27; in templates/service.yaml. templates/service.yaml'>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>TP003</b> TODO marker in template <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Kubernetes Templates &amp; API Versions &middot; templates/service.yaml</span></div>
+<p><b>Found:</b> Found &#x27;TODO&#x27; in templates/service.yaml.</p>
+<p><b>Why:</b> Unfinished work shipping to production.</p>
+<p class=fix><b>Fix:</b> Resolve or ticket it.</p>
+</div>
+<div class='card lowinfo' id=CH009 data-text='ch009 no maintainers listed maintainers is not set. chart.yaml'>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>CH009</b> No maintainers listed <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> maintainers is not set.</p>
+<p><b>Why:</b> Ownership metadata matters once a chart is shared beyond one team.</p>
+<p class=fix><b>Fix:</b> Add maintainers with name/email.</p>
+</div>
+<div class='card lowinfo' id=CH011 data-text='ch011 no icon/home/sources metadata none of icon, home, sources are set. chart.yaml'>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>CH011</b> No icon/home/sources metadata <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene &middot; Chart.yaml</span></div>
+<p><b>Found:</b> None of icon, home, sources are set.</p>
+<p><b>Why:</b> Cosmetic, but repos/UIs (ArtifactHub, Rancher) use them.</p>
+<p class=fix><b>Fix:</b> Add links if the chart is published.</p>
+</div>
+<div class='card lowinfo' id=CH022 data-text='ch022 no notes.txt templates/notes.txt not found. '>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>CH022</b> No NOTES.txt <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene</span></div>
+<p><b>Found:</b> templates/NOTES.txt not found.</p>
+<p><b>Why:</b> NOTES.txt is printed after install and is the cheapest documentation you can ship.</p>
+<p class=fix><b>Fix:</b> Add templates/NOTES.txt with connection/usage hints.</p>
+</div>
+<div class='card lowinfo' id=CH024 data-text='ch024 no .helmignore .helmignore not found. '>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>CH024</b> No .helmignore <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene</span></div>
+<p><b>Found:</b> .helmignore not found.</p>
+<p><b>Why:</b> Packaged charts pick up junk (.git, editor files) without it.</p>
+<p class=fix><b>Fix:</b> Add a .helmignore.</p>
+</div>
+<div class='card lowinfo' id=CH025 data-text='ch025 no helm test hooks templates/tests/ not found. '>
+<div class=cardhead style='border-color:#5f6368'><span class=sev style='background:#5f6368'>INFO</span><b>CH025</b> No helm test hooks <span class="basis" style="background:#2e7d32">observed</span><span class=cat>Helm Chart Structure &amp; Hygiene</span></div>
+<p><b>Found:</b> templates/tests/ not found.</p>
+<p><b>Why:</b> &#x27;helm test&#x27; smoke tests catch broken releases immediately after install/upgrade.</p>
+<p class=fix><b>Fix:</b> Add a tests/ pod that curls the service readiness endpoint.</p>
+</div>
+</section>
+<section id=proofs><h2>Mathematical proof tables</h2>
+<details><summary>JVM memory budget - Deployment &#x27;RELEASE-NAME-payments&#x27; / container &#x27;payments&#x27;</summary>
+<p class=note>Container memory must hold the WHOLE JVM, not just the heap. Estimation model: T = H + Metaspace + CodeCache + threads*Xss + DirectBuffers + GC/internal. JVM visibility of the limit: 8u151 without applied experimental cgroup flags.</p>
+<table><thead><tr><th>Component</th><th>Size</th><th>Basis</th></tr></thead><tbody><tr><td>Container memory limit</td><td>NOT SET</td><td>-</td></tr><tr><td>Max heap (H)</td><td>4 GiB</td><td>JVM CANNOT see the limit (8u151 without applied experimental cgroup flags); default 25% x assumed node RAM 16 GiB</td></tr><tr><td>Metaspace (est.)</td><td>128 MiB</td><td>typical framework app 80-180 MiB</td></tr><tr><td>JIT code cache (est.)</td><td>64 MiB</td><td>steady-state</td></tr><tr><td>Thread stacks (100 x 1 MiB)</td><td>100 MiB</td><td>-Xss x thread count</td></tr><tr><td>Direct buffers (est.)</td><td>64 MiB</td><td>est. 64 MiB typical</td></tr><tr><td>GC + JVM internal (est.)</td><td>48 MiB</td><td>card tables, symbols</td></tr><tr><td>ESTIMATED PEAK RSS (T)</td><td>4.4 GiB</td><td>T = H + non-heap components</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> No memory limit: the JVM competes with every pod on the node; a leak becomes the node&#x27;s problem. Set a limit and size the heap from it.</p>
+</details>
+<details><summary>CPU as seen by the JVM - Deployment &#x27;RELEASE-NAME-payments&#x27; / container &#x27;payments&#x27;</summary>
+<p class=note>Kubernetes CPU limits are CFS quotas; the JVM derives its parallelism from them.</p>
+<table><thead><tr><th>Item</th><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td>CPU request</td><td>100m</td><td>guaranteed share under contention; HPA denominator</td></tr><tr><td>CPU limit</td><td>none</td><td>pod may use idle node CPU</td></tr><tr><td>availableProcessors()</td><td>1</td><td>cpu.shares heuristic: ceil(request 100m / 1000m) - applies to Java 8u151 (JDK 8 / pre-11.0.17). JDK 11.0.17+/17+ would instead see ALL node CPUs here.</td></tr><tr><td>Consequences</td><td></td><td>sizes GC threads, ForkJoinPool, C2 compiler threads, Netty event loops</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> No CPU limit: generally GOOD for JVMs (no CFS throttle); requests still guarantee fair share under contention.</p>
+</details>
+<details><summary>Probe budget vs JVM startup - Deployment &#x27;RELEASE-NAME-payments&#x27; / &#x27;payments&#x27;</summary>
+<p class=note>A liveness probe that fires before the JVM can answer does not detect failure - it CAUSES it.</p>
+<table><thead><tr><th>Quantity</th><th>Value</th><th>Note</th></tr></thead><tbody><tr><td>startupProbe window</td><td>none</td><td>liveness starts immediately</td></tr><tr><td>liveness initialDelaySeconds</td><td>5s</td><td></td></tr><tr><td>liveness period x failureThreshold</td><td>5s x 3 = 15s</td><td></td></tr><tr><td>Worst-case time-to-kill</td><td>20s</td><td>init(5) + period(5) x failures(3)</td></tr><tr><td>Typical JVM app startup</td><td>~60s</td><td>mid-size Spring Boot on ~1 CPU (assumption; measure yours)</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> BUDGET 20s &lt; startup ~60s: kubelet kills the pod BEFORE the app can come up; each restart is slower (CPU contention) =&gt; CrashLoopBackOff of a perfectly healthy build.</p>
+</details>
+<details><summary>QoS class and eviction order</summary>
+<p class=note>QoS derivation: Guaranteed iff requests == limits for BOTH cpu and memory on every container; BestEffort iff none set; else Burstable. Under node memory pressure kubelet evicts BestEffort, then Burstable exceeding requests, then Guaranteed last.</p>
+<table><thead><tr><th>Container</th><th>req CPU</th><th>req Mem</th><th>lim CPU</th><th>lim Mem</th><th>QoS</th><th>Eviction</th></tr></thead><tbody><tr><td>Deployment/RELEASE-NAME-payments:payments</td><td>100m</td><td>0 B</td><td>-</td><td>-</td><td>Burstable</td><td>evicted before Guaranteed</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> For latency-sensitive JVMs aim for Guaranteed memory (request = limit) and request-only CPU.</p>
+</details>
+<details><summary>HPA scaling arithmetic - HPA &#x27;RELEASE-NAME-payments&#x27;</summary>
+<p class=note>How the HPA converts measured CPU into replica counts (current replicas = 1 for illustration).</p>
+<table><thead><tr><th>Avg utilization</th><th>Per-pod usage</th><th>Raw formula</th><th>Desired (clamped)</th><th>Action</th></tr></thead><tbody><tr><td>48%</td><td>48m/pod</td><td>ceil(1 x 48/95) = 1</td><td>1</td><td>no change</td></tr><tr><td>86%</td><td>86m/pod</td><td>ceil(1 x 86/95) = 1</td><td>1</td><td>no change (within 10% tolerance)</td></tr><tr><td>95%</td><td>95m/pod</td><td>ceil(1 x 95/95) = 1</td><td>1</td><td>no change (within 10% tolerance)</td></tr><tr><td>105%</td><td>105m/pod</td><td>ceil(1 x 105/95) = 2</td><td>2</td><td>scale UP</td></tr><tr><td>142%</td><td>142m/pod</td><td>ceil(1 x 142/95) = 2</td><td>2</td><td>scale UP</td></tr><tr><td>190%</td><td>190m/pod</td><td>ceil(1 x 190/95) = 2</td><td>2</td><td>scale UP</td></tr><tr><td>285%</td><td>285m/pod</td><td>ceil(1 x 285/95) = 3</td><td>3</td><td>scale UP</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> Formula: desired = ceil(current x currentUtil / target), clamped to [1, 20], with a +/-10% tolerance dead-band. With cpu request 100m and target 95%, scale-out begins once average usage exceeds ~104m per pod (95% x 100m x 1.1).</p>
+</details>
+<details><summary>Availability vs replica floor</summary>
+<p class=note>Redundancy math for the minimum number of pods the chart allows to exist.</p>
+<table><thead><tr><th>Replicas n</th><th>Availability 1-(1-p)^n</th><th>Expected downtime</th></tr></thead><tbody><tr><td>1</td><td>99.500000%</td><td>~216.0 min/month  &lt;-- current floor</td></tr><tr><td>2</td><td>99.997500%</td><td>~1.1 min/month</td></tr><tr><td>3</td><td>99.999988%</td><td>~0.32 sec/month</td></tr><tr><td>5</td><td>100.000000%</td><td>~0.00 sec/month</td></tr></tbody></table>
+<p class=verdict><b>Verdict:</b> Assuming INDEPENDENT pod failures at 99.5% per-pod availability, availability = 1-(1-p)^n. Your scale floor is n=1 (HPA minReplicas). n=1 concentrates ~100x more downtime than n=2 - redundancy, not pod quality, dominates availability. Caveat: the independence assumption is exactly what fails in correlated events (bad deploy, node/zone outage, shared dependency down) - those hit ALL replicas at once and no exponent helps. Treat this table as the upper bound that redundancy alone can buy.</p>
+</details>
+</section>
+<section id=verify><h2>Verify on your cluster</h2>
+<p class=note>The tool reads files, not a cluster. Run each command to close a gap static analysis cannot see.</p>
+<details><summary>Will the HPA actually scale?</summary>
+<p><b>Gap:</b> Static files cannot show whether metrics-server / a custom-metrics adapter is installed, or the HPA&#x27;s live status.</p>
+<pre>$ kubectl describe hpa &lt;release&gt;-&lt;name&gt; -n &lt;namespace&gt;
+$ kubectl top pods -n &lt;namespace&gt; -l app=payments</pre>
+<p><b>Read:</b> In `describe hpa`, the Conditions block must show `ScalingActive True`. `AbleToScale False` / `FailedGetResourceMetric` means the metrics API is not serving this HPA - install/repair metrics-server (CPU &amp; memory targets).</p></details>
+<details><summary>Are the &#x27;missing&#x27; requests defaulted at admission?</summary>
+<p><b>Gap:</b> A namespace LimitRange can inject requests/limits this report flags as absent - changing the real QoS and scheduling.</p>
+<pre>$ kubectl get limitrange -n &lt;namespace&gt; -o yaml
+$ kubectl get pods -n &lt;namespace&gt; -l app=payments -o custom-columns=NAME:.metadata.name,QOS:.status.qosClass</pre>
+<p><b>Read:</b> A `LimitRange` with `defaultRequest`/`default` for `type: Container` supplies the values flagged missing - so the real `status.qosClass` (second command) may be Burstable/Guaranteed, not BestEffort. No LimitRange: the findings stand.</p></details>
+<details><summary>Is the deprecated API fatal on YOUR cluster?</summary>
+<p><b>Gap:</b> Whether a removed-API object is rejected depends on the target cluster&#x27;s version, which the files do not name.</p>
+<pre>$ kubectl version -o json | grep -A3 serverVersion
+$ kubectl get --raw /metrics 2&gt;/dev/null | grep apiserver_requested_deprecated_apis</pre>
+<p><b>Read:</b> If the server minor version is at or past the removal version named in the TP010 finding, `helm upgrade`/`kubectl apply` of that object WILL be rejected - migrate before the upgrade. The `/metrics` line shows whether anything on the live cluster is still calling the deprecated API.</p></details>
+<details><summary>Could a namespace quota reject this workload?</summary>
+<p><b>Gap:</b> A ResourceQuota can reject an otherwise-valid pod; quotas live in the cluster, not the chart.</p>
+<pre>$ kubectl get resourcequota -n &lt;namespace&gt; -o yaml</pre>
+<p><b>Read:</b> If `status.used` is near `status.hard` for cpu/memory/pods, the workload may be rejected at admission even though this chart is internally valid.</p></details>
+<details><summary>Does the JVM actually see the cgroup limit?</summary>
+<p><b>Gap:</b> The heap the JVM chooses at runtime depends on whether it can read the container limit - which depends on the JDK build and the node&#x27;s cgroup version, neither fully knowable from files.</p>
+<pre>$ kubectl exec -n &lt;namespace&gt; $(kubectl get pod -n &lt;namespace&gt; -l app=payments -o name | head -1) -- java -XX:+PrintFlagsFinal -version 2&gt;/dev/null | grep -E &#x27;MaxHeapSize|MaxRAMPercentage|UseContainerSupport|ActiveProcessorCount&#x27;
+$ kubectl exec -n &lt;namespace&gt; $(kubectl get pod -n &lt;namespace&gt; -l app=payments -o name | head -1) -- sh -c &#x27;stat -fc %T /sys/fs/cgroup&#x27;   # cgroup2fs = cgroup v2</pre>
+<p><b>Read:</b> `MaxHeapSize` should be ~ (your memory LIMIT x the heap percentage), NOT ~1/4 of the node&#x27;s RAM - the latter means the JVM is sizing from the host (old JDK or cgroup-v2 blindness). `cgroup2fs` confirms a v2 node; verify your JDK supports it (8u372+ / 11.0.16+ / 15+).</p></details>
+<details><summary>Get the real object names for the commands above</summary>
+<p><b>Gap:</b> In static mode, object names shown are template placeholders (e.g. `&lt;orders.fullname&gt;`), not the deployed names.</p>
+<pre>$ helm template &lt;release&gt; &lt;chart-dir&gt; | grep -E &#x27;^kind:|^  name:&#x27;
+$ # after install:  helm get manifest &lt;release&gt; -n &lt;namespace&gt;</pre>
+<p><b>Read:</b> Render the chart (or read the live release) to get the concrete Deployment/HPA names and drop them into the `kubectl` commands above.</p></details>
+</section>
+<section id=education><h2>Education appendix</h2>
+<details><summary>Show the HPA / JVM-in-container primer</summary><pre class=edu>
+6.1  THE HPA CONTROL LOOP
+
+  Every ~15s the HPA computes, per metric:  desired = ceil(currentReplicas x currentValue /
+  targetValue), takes the MAX across metrics, applies a +/-10% tolerance dead-band, clamps to
+  [minReplicas, maxReplicas], then applies behavior policies (default: scale-up immediately,
+  scale-down after a 300s stabilization window). Two facts follow directly from the formula:
+      (a) CPU &#x27;utilization&#x27; is usage divided by the pod&#x27;s REQUEST - not its limit, not node
+      capacity. Wrong requests make the HPA scale wrongly, in exact proportion.
+      (b) Any metric that does not fall when replicas rise breaks the loop: desired can never
+      go below current. JVM memory is the canonical example (heap high-water mark).
+
+6.2  THE JVM MEMORY MODEL IN A CONTAINER
+
+      container limit (cgroup memory.max)  &lt;-- kernel kills here (exit 137)
+      +--------------------------------------------------+
+      |  heap (-Xmx / MaxRAMPercentage)                  |
+      |  metaspace (classes; unbounded by default!)      |
+      |  JIT code cache                                  |
+      |  thread stacks (threads x -Xss, ~1 MiB each)     |
+      |  direct/NIO buffers (default cap = Xmx!)         |
+      |  GC bookkeeping, symbols, JVM itself             |
+      +--------------------------------------------------+
+  The kernel enforces the SUM. A heap that fits is necessary but not sufficient - rule of thumb:
+  heap &lt;= 50-75% of the limit, and never less than ~250-400 MiB of absolute non-heap headroom for
+  framework apps. The kernel OOM kill (exit 137) produces NO Java stack trace and NO heap dump: if
+  you see 137/OOMKilled with no OutOfMemoryError in logs, it was the cgroup, not the heap.
+
+6.3  JAVA CONTAINER-AWARENESS TIMELINE
+
++-----------------------+---------------------------------+-----------------+----------------------+
+| JVM                   | Sees cgroup v1 limits?          | Sees cgroup v2? | Heap % flags         |
++=======================+=================================+=================+======================+
+| Java 8 &lt; 8u131        | NO - uses host RAM/CPUs         | NO              | -Xmx only            |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u131 - 8u190         | memory only, with -XX:+UnlockEx | NO              | -Xmx, MaxRAMFraction |
+|                       | perimentalVMOptions -XX:+UseCGr |                 |                      |
+|                       | oupMemoryLimitForHeap           |                 |                      |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u191 - 8u371         | YES (UseContainerSupport        | NO              | MaxRAMPercentage     |
+|                       | backport, default on)           |                 |                      |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 8u372+                | YES                             | YES             | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 11.0.0 - 11.0.15      | YES                             | NO              | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+| 11.0.16+, 15+, 17, 21 | YES                             | YES             | MaxRAMPercentage     |
++-----------------------+---------------------------------+-----------------+----------------------+
+  cgroup v2 is the default on modern node images (Ubuntu 22.04+, EKS AL2023, current GKE/AKS). A
+  pre-v2 JVM on a v2 node silently falls back to HOST sizing - the worst failure mode returns even
+  though your JDK &#x27;is container aware&#x27;.
+
+6.4  A SANE BASELINE FOR A JVM SERVICE CHART
+
++--------------------------------+--------------------------------+--------------------------------+
+| Setting                        | Baseline                       | Reason                         |
++================================+================================+================================+
+| requests.memory =              | e.g. 1Gi / 1Gi                 | memory is incompressible;      |
+| limits.memory                  |                                | Guaranteed-style memory QoS    |
++--------------------------------+--------------------------------+--------------------------------+
+| requests.cpu                   | 250m-1000m ~ typical usage     | HPA denominator; scheduler     |
+|                                |                                | packing                        |
++--------------------------------+--------------------------------+--------------------------------+
+| limits.cpu                     | unset (or &gt;= 2x request)       | avoid CFS throttling of GC/JIT |
+|                                |                                | bursts                         |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:MaxRAMPercentage           | 50-75                          | heap scales with the limit     |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:+ExitOnOutOfMemoryError    | always                         | die visibly; let K8s heal      |
++--------------------------------+--------------------------------+--------------------------------+
+| -XX:ActiveProcessorCount       | set if no cpu limit            | stable thread-pool sizing      |
++--------------------------------+--------------------------------+--------------------------------+
+| startupProbe                   | period 5s x threshold 24-60    | protects slow JVM starts from  |
+|                                |                                | liveness                       |
++--------------------------------+--------------------------------+--------------------------------+
+| readiness != liveness          | always                         | shed traffic without restarts  |
++--------------------------------+--------------------------------+--------------------------------+
+| HPA                            | autoscaling/v2, CPU 60-75%,    | headroom for scale-up lag      |
+|                                | min &gt;= 2                       |                                |
++--------------------------------+--------------------------------+--------------------------------+
+| PDB                            | maxUnavailable: 1              | survive drains/upgrades        |
++--------------------------------+--------------------------------+--------------------------------+
+| replicas                       | omit when HPA enabled          | helm upgrade must not reset    |
+|                                |                                | scale                          |
++--------------------------------+--------------------------------+--------------------------------+
+| ENTRYPOINT                     | exec form (java as PID 1)      | SIGTERM -&gt; graceful shutdown   |
++--------------------------------+--------------------------------+--------------------------------+
+
+6.5  THE RELATIVITY TRAP - REQUESTS, NOT LIMITS, DRIVE SCALING
+
+  The HPA computes CPU &#x27;utilization&#x27; as usage / REQUEST - never the limit, never node capacity.
+  Set the request as a low placeholder and you lie to the controller. Example: request=100m,
+  limit=2000m, actual usage=150m. The kernel sees a pod using 7.5% of its 2000m ceiling - nowhere
+  near throttling. The HPA sees 150m/100m = 150% utilization and, against a 70% target, scales
+  aggressively to maxReplicas while every pod sits nearly idle. Under-sized requests &#x27;trick&#x27; the
+  loop into believing the system is saturated when it is merely active. Right-size requests FIRST
+  (a day of VPA in recommendation mode); accuracy in the denominator is the only route to
+  stability in the output.
+
+6.6  COMPRESSIBLE VS INCOMPRESSIBLE RESOURCES
+
++--------------------+----------------------------------------+------------------------------------+
+|                    | CPU (compressible)                     | Memory (incompressible)            |
++====================+========================================+====================================+
+| Exhaustion         | CFS throttling (slows down)            | OOM kill - SIGKILL (dies)          |
++--------------------+----------------------------------------+------------------------------------+
+| Kernel signal      | container_cpu_cfs_throttled_periods_to | container_memory_working_set_bytes |
+|                    | tal                                    |                                    |
++--------------------+----------------------------------------+------------------------------------+
+| Tracks load?       | yes - roughly linear with work         | no - heap/baseline stays flat      |
++--------------------+----------------------------------------+------------------------------------+
+| Good scale metric? | yes for stateless services             | NO - prone to permanent scale-out  |
++--------------------+----------------------------------------+------------------------------------+
+  Because memory is incompressible and a JVM/Go runtime rarely returns it to the OS, memory
+  &#x27;utilization&#x27; does not fall when load falls: an HPA on memory ratchets to max and stays.
+  Diagnostic: if container_cpu_cfs_throttled_periods_total climbs while the HPA sits idle, your
+  CPU request is too small or you are scaling on the wrong metric.
+
+6.7  THE UNREADY-POD OUTAGE (dampening logic)
+
+  When new pods fail readiness (bad deploy, missing DB schema) the HPA can REFUSE to scale even at
+  100% CPU on the ready pods. Its four-step logic: (1) group pods Ready / Unready / Ignored; (2)
+  first pass uses Ready pods only; (3) if that says scale-up, add the Unready pods back at 0%
+  usage; (4) if the resulting ratio is within a +/-10% tolerance of target, do nothing. With
+  maxSurge=100%, two hot pods plus two unready-at-0% average to (100+100+0+0)/4 = 50%, well inside
+  the tolerance of a 70% target - so scaling STOPS exactly when you need it. Mitigation: keep
+  maxSurge at 25-50% so the ready pods&#x27; signal survives the dampening.
+
+6.8  THRASHING, STABILIZATION, AND THE HPA+VPA DEATH SPIRAL
+
+  Thrashing: high metric -&gt; scale up -&gt; load per pod drops -&gt; scale down -&gt; load spikes -&gt; repeat,
+  churning pods and cold caches. Damp it with stabilizationWindowSeconds over a rolling history.
+  The production pattern is ASYMMETRIC - react up fast, release down slowly:
+    behavior:
+      scaleUp:   { stabilizationWindowSeconds: 0,   policies: [{type: Percent, value: 100,
+    periodSeconds: 15}] }
+      scaleDown: { stabilizationWindowSeconds: 300, policies: [{type: Percent, value: 10,
+    periodSeconds: 60}] }
+  HPA+VPA on the SAME resource is a death spiral: VPA lowers the request because usage is low; the
+  HPA sees a smaller denominator, computes higher utilization, and scales out unnecessarily. Rule:
+  never let both auto-update the same resource. Use VPA in recommendation/initial mode to
+  right-size requests; use the HPA to handle traffic. Also beware I/O-bound services: waiting on a
+  lock or a slow downstream shows LOW CPU, so a CPU HPA never scales even as p99 breaches the SLO
+  - scale those on latency or queue depth.
+
+6.9  DEMAND METRICS - SCALE ON CAUSE, NOT SYMPTOM
+
+  CPU/memory are lagging symptoms. Demand metrics track the cause:
++--------------------+--------------------------+--------------------------+
+| Signal             | Best for                 | Target rule of thumb     |
++====================+==========================+==========================+
+| Requests/sec (RPS) | stateless HTTP           | linear proxy for demand  |
++--------------------+--------------------------+--------------------------+
+| Queue depth / lag  | workers (Kafka/RabbitMQ) | ~30s of work to process  |
++--------------------+--------------------------+--------------------------+
+| p99 latency        | SLO-sensitive APIs       | p95 = 50% of the SLO     |
++--------------------+--------------------------+--------------------------+
+| CPU utilization    | general compute          | 50-75% (60-75% for JVMs) |
++--------------------+--------------------------+--------------------------+
+  Expose app metrics via the Prometheus Adapter, or drive scaling from external event sources with
+  KEDA (queues, streams, cron). RPS scales linearly regardless of I/O wait, which is why it beats
+  CPU for latency-bound services.
+
+6.10  PREDICTIVE SCALING AND THE SCALING-INVARIANT SIGNAL
+
+  Reactive scaling has a &#x27;startup gap&#x27;: the sync period (~15s) plus metrics-server scrape latency
+  (30-60s) plus pod schedule + image pull + JVM warmup means the system is blind to the first
+  minute of a surge. Predictive scaling forecasts load (e.g. Holt&#x27;s / triple-exponential
+  smoothing) and provisions capacity BEFORE the peak. It must forecast on a CLUSTER-WIDE AGGREGATE
+  (sum of per-pod metrics), not a per-pod average: adding replicas drops the average even as total
+  load rises, so the average is not a stable time series. The aggregate is scaling-invariant -
+  stable however load redistributes - which is what makes clean extrapolation possible. A typical
+  pipeline: align irregular batches onto a uniform grid, impute missing pods by carrying forward,
+  gradually weight in new pods (so a starting pod is not read as a load &#x27;drop&#x27;), forecast to the
+  init-timeout horizon, then solve for the replica count needed now so capacity is ready when the
+  peak arrives.
+
+6.11  WORKLOAD -&gt; SCALER DECISION FRAMEWORK
+
++----------------------+-------------------+------------------+------------------+
+| Workload             | Signal            | Tool             | Target           |
++======================+===================+==================+==================+
+| Stateless HTTP       | RPS / CPU         | HPA              | 50-60% CPU       |
++----------------------+-------------------+------------------+------------------+
+| I/O-bound API        | p99 latency       | HPA + Prometheus | p95 = 50% of SLO |
++----------------------+-------------------+------------------+------------------+
+| Message consumer     | queue depth / lag | KEDA             | ~30s of work     |
++----------------------+-------------------+------------------+------------------+
+| Stateful / singleton | historical usage  | VPA (recommend)  | n/a              |
++----------------------+-------------------+------------------+------------------+
+  Non-negotiables: minReplicas &gt;= 2 (no single point of failure at scale-in); a
+  PodDisruptionBudget so the HPA/drains cannot evict every pod at once; right-size requests before
+  setting targets.
+
+6.12  HOW TO READ THE &#x27;BASIS&#x27; LINE ON EACH FINDING
+
+  Every finding declares how the tool knows what it claims, so a guess never reads like a
+  measurement: OBSERVED = read directly from your files (stated as fact); DERIVED = arithmetic on
+  your values using the stated model and estimated non-heap constants (re-check with measured
+  numbers); ASSUMED = the tool could NOT see the truth and fell back to a guess - it prints an
+  &#x27;Assumes:&#x27; line, is flagged in the fix-first list, and (if CRITICAL) is capped at HIGH&#x27;s score
+  weight so the tool&#x27;s own uncertainty can never sink your grade. When in doubt, act on OBSERVED
+  first and verify ASSUMED before touching anything.
+
+6.13  GOLDEN RULES
+
+  1. The HPA divides by requests: requests ARE your scaling policy.
+  2. The kernel sums everything: budget the whole JVM, not the heap.
+  3. Kubernetes restarts what dies: make the JVM die on OOM, cleanly on SIGTERM.
+  4. Never scale a JVM on memory utilization.
+  5. Anything mutable (&#x27;latest&#x27;, unpinned bases, helm-managed replicas under an HPA) will
+  eventually mutate mid-incident.
+  6. Scale up fast, scale down slow; never run HPA and VPA on the same resource.</pre></details></section>
+<section id=methodology><h2>Methodology &amp; limitations</h2>
+<p class=note>Analysis mode: static. Estimates are labelled DERIVED/ASSUMED. Complement with kubeconform, a policy engine, and a load test. See the plain-text report's methodology section for the full statement.</p></section>
+<script>
+function ff(){
+ var q=document.getElementById('filter').value.toLowerCase();
+ var hi=document.getElementById('hideinfo').checked;
+ document.querySelectorAll('#findings .card').forEach(function(c){
+  var t=c.getAttribute('data-text')||'';
+  var low=c.classList.contains('lowinfo');
+  var show=(t.indexOf(q)>-1)&&!(hi&&low);
+  c.classList.toggle('hidden',!show);
+ });
+}
+</script>
+</body></html>

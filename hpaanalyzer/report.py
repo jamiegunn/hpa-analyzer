@@ -46,6 +46,16 @@ def _section(title: str, number: str = "") -> str:
     head = f"{number}  {title}" if number else title
     return f"\n\n{_hr('=')}\n{head.upper()}\n{_hr('=')}\n"
 
+class _Sec:
+    """Incrementing section numberer so sections can appear/disappear by
+    verbosity level without hand-maintained numbers."""
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self, title: str) -> str:
+        self.n += 1
+        return _section(f"{self.n}. {title}")
+
 
 # ---------------------------------------------------------------------------
 # ASCII tables with cell wrapping
@@ -89,7 +99,46 @@ def _table(headers: List[str], rows: List[List[str]], width: int = WIDTH) -> str
 # Report body
 # ---------------------------------------------------------------------------
 
-def render(result: AnalysisResult, target: str) -> str:
+def stdout_summary(result: AnalysisResult, report_path: str,
+                   html_path: str = None) -> str:
+    """The terminal-first answer: grade, counts, the top fixes, and where the
+    full report is - so an SRE never has to open a file to know what to do."""
+    findings = sorted(
+        result.findings,
+        key=lambda f: (-f.severity.rank, -WEIGHTS[f.category], f.rule_id))
+    score = overall_score(result)
+    counts = {s: sum(1 for f in findings if f.severity is s) for s in Severity}
+    L: List[str] = []
+    if score is None:
+        L.append("  RESULT: NOT GRADED (no analyzable chart input - see report)")
+    else:
+        L.append(f"  GRADE {grade(score)}  ({score:.1f}/100)   "
+                 f"{counts[Severity.CRITICAL]} critical, "
+                 f"{counts[Severity.HIGH]} high, "
+                 f"{counts[Severity.MEDIUM]} medium, {counts[Severity.LOW]} low")
+    top = [f for f in findings
+           if f.severity in (Severity.CRITICAL, Severity.HIGH)]
+    if top:
+        L.append("  Fix first:")
+        for i, f in enumerate(top[:5], 1):
+            loc = f"  ({f.file})" if f.file else ""
+            tag = "  [ASSUMED - verify]" if f.basis is Basis.ASSUMED else ""
+            L.append(f"    {i}. [{f.rule_id}] {f.title}{loc}{tag}")
+        if len(top) > 5:
+            L.append(f"    ... +{len(top) - 5} more critical/high "
+                     f"(see report)")
+    elif score is not None:
+        L.append("  No critical or high findings.")
+    tail = f"  Full report: {report_path}"
+    if html_path:
+        tail += f"   |   HTML: {html_path}"
+    L.append(tail)
+    return "\n".join(L)
+
+
+def render(result: AnalysisResult, target: str, external=None,
+           level: str = "default", teach: bool = False,
+           show_all: bool = False) -> str:
     ctx = result.context
     findings = sorted(
         result.findings,
@@ -135,8 +184,14 @@ def render(result: AnalysisResult, target: str) -> str:
                    f"{', ' + d.java_flavor if d.java_flavor else ''}]")
     L.extend(inv or ["  (nothing found)"])
 
-    # ----- executive summary ------------------------------------------------
-    L.append(_section("1. Executive summary"))
+    # verbosity: full implies the teaching appendix and expanded LOW/INFO
+    if level == "full":
+        teach = True
+        show_all = True
+    sec = _Sec()
+
+    # ----- executive summary (all levels) ----------------------------------
+    L.append(sec("Executive summary"))
     if score is None:
         L.append("  OVERALL QUALITY SCORE : NOT GRADED")
         if ctx.ungradeable_reason:
@@ -173,41 +228,42 @@ def render(result: AnalysisResult, target: str) -> str:
                            + (f"  ({f.file})" if f.file else "") + tag, indent=4))
         if len(crits) > 5:
             L.append(_wrap(f"... and {len(crits) - 5} more critical finding(s) - "
-                           f"see the full list in section 4.", indent=4))
+                           f"see the Findings section below.", indent=4))
     elif counts[Severity.HIGH]:
         L.append("\n  No critical findings; start with the HIGH severity list below.")
     else:
         L.append("\n  No critical or high findings - solid baseline.")
 
-    # ----- coverage ----------------------------------------------------------
-    L.append(_section("2. Analysis coverage - what was and was NOT checked"))
-    L.append(_wrap(
-        "Findings can only come from files that were successfully analyzed. "
-        "Anything marked as failed, skipped or unknown below produced NO "
-        "findings - treat that as missing coverage, never as a clean bill "
-        "of health."))
-    L.append("")
-    if ctx.coverage:
-        L.append(_table(["Input", "Coverage"],
-                        [list(row) for row in ctx.coverage]))
-    else:
-        L.append("  (no coverage records - nothing was analyzable)")
-    if ctx.render_mode == "helm":
-        L.append(_wrap("\nMode: `helm template` rendered the chart with its "
-                       "real template engine - manifests below are rendered "
-                       "truth for the analyzed values. Objects marked "
-                       "'conditional' exist in templates but do not render "
-                       "with these values.", indent=0))
-    else:
-        L.append(_wrap(f"\nMode: {ctx.render_mode}. Static scrubbing "
-                       f"approximates helm rendering: conditionals are "
-                       f"analyzed as taken and complex template expressions "
-                       f"may hide configuration from these checks. Install "
-                       f"helm on PATH and re-run for rendered-truth analysis "
-                       f"- it materially improves precision.", indent=0))
+    # ----- coverage (default / full) ---------------------------------------
+    if level != "summary":
+        L.append(sec("Analysis coverage - what was and was NOT checked"))
+        L.append(_wrap(
+            "Findings can only come from files that were successfully analyzed. "
+            "Anything marked as failed, skipped or unknown below produced NO "
+            "findings - treat that as missing coverage, never as a clean bill "
+            "of health."))
+        L.append("")
+        if ctx.coverage:
+            L.append(_table(["Input", "Coverage"],
+                            [list(row) for row in ctx.coverage]))
+        else:
+            L.append("  (no coverage records - nothing was analyzable)")
+        if ctx.render_mode == "helm":
+            L.append(_wrap("\nMode: `helm template` rendered the chart with its "
+                           "real template engine - manifests below are rendered "
+                           "truth for the analyzed values. Objects marked "
+                           "'conditional' exist in templates but do not render "
+                           "with these values.", indent=0))
+        else:
+            L.append(_wrap(f"\nMode: {ctx.render_mode}. Static scrubbing "
+                           f"approximates helm rendering: conditionals are "
+                           f"analyzed as taken and complex template expressions "
+                           f"may hide configuration from these checks. Install "
+                           f"helm on PATH and re-run for rendered-truth analysis "
+                           f"- it materially improves precision.", indent=0))
 
-    # ----- scorecard ----------------------------------------------------------
-    L.append(_section("3. Scorecard by category"))
+    # ----- scorecard (all levels) ------------------------------------------
+    L.append(sec("Scorecard by category"))
     rows = []
     for cat, cscore, cfind in category_scores(result):
         n_by_sev = ", ".join(
@@ -227,65 +283,140 @@ def render(result: AnalysisResult, target: str) -> str:
                    "floored at 0. Overall = weighted mean over applicable "
                    "categories (N/A categories are excluded, not free points)."))
 
-    # ----- findings -----------------------------------------------------------
-    L.append(_section("4. Findings and remediation"))
-    if not findings:
-        L.append("  No findings. Exceptional.")
-    order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW,
-             Severity.INFO]
-    for sev in order:
-        sel = [f for f in findings if f.severity is sev]
-        if not sel:
-            continue
-        L.append(f"\n{_hr('-')}")
-        L.append(f"{sev.label}  ({len(sel)})")
-        L.append(_hr("-"))
-        if sev is Severity.INFO:
-            L.append(_wrap("Housekeeping items - zero score impact, one line "
-                           "each so they stop competing with real problems:",
-                           indent=2))
+    if level == "summary":
+        # ----- compact top findings, then pointer --------------------------
+        L.append(sec("Top findings (CRITICAL & HIGH)"))
+        top = [f for f in findings
+               if f.severity in (Severity.CRITICAL, Severity.HIGH)]
+        if not top:
+            L.append("  None at CRITICAL/HIGH. See the full report for "
+                     "MEDIUM/LOW items.")
+        for f in top:
+            loc = f" ({f.file})" if f.file else ""
+            L.append(_wrap(f"[{f.severity.label[0]}] [{f.rule_id}] {f.title}"
+                           f"{loc}  ->  {f.fix}", indent=2))
+        L.append(_wrap("\nThis is the --summary view. Re-run without --summary "
+                       "for coverage, full findings, proof tables and the "
+                       "cluster-verify commands; add --full (or --teach) for the "
+                       "education appendix.", indent=2))
+    else:
+        # ----- findings (LOW/INFO collapsed unless --all) ------------------
+        L.append(sec("Findings and remediation"))
+        if not findings:
+            L.append("  No findings. Exceptional.")
+        order = [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
+                 Severity.LOW, Severity.INFO]
+        for sev in order:
+            sel = [f for f in findings if f.severity is sev]
+            if not sel:
+                continue
+            compact = (sev is Severity.INFO) or (sev is Severity.LOW and not show_all)
+            L.append(f"\n{_hr('-')}")
+            L.append(f"{sev.label}  ({len(sel)})")
+            L.append(_hr("-"))
+            if compact:
+                if sev is Severity.INFO:
+                    note = ("Housekeeping - zero score impact, one line each so "
+                            "they stop competing with real problems:")
+                else:
+                    note = (f"Summarized (one line each) - run with --all for the "
+                            f"full Why/Math/Fix on each:")
+                L.append(_wrap(note, indent=2))
+                for f in sel:
+                    loc = f" ({f.file})" if f.file else ""
+                    L.append(_wrap(f"[{f.rule_id}] {f.title}{loc} -> {f.fix}",
+                                   indent=4))
+                continue
             for f in sel:
-                loc = f" ({f.file})" if f.file else ""
-                L.append(_wrap(f"[{f.rule_id}] {f.title}{loc} -> {f.fix}",
-                               indent=4))
-            continue
-        for f in sel:
-            loc = f" | {f.file}" + (f":{f.line}" if f.line else "") if f.file else ""
-            L.append(f"\n[{f.rule_id}] {f.title}")
-            L.append(f"    Category: {f.category.value}{loc}")
-            L.append(_wrap(f"Basis : {_basis_phrase(f.basis)}", indent=4))
-            if f.basis is Basis.ASSUMED and f.assumes:
-                L.append(_wrap(f"Assumes: {f.assumes} - if that is wrong, this "
-                               f"finding does not apply.", indent=4))
-            L.append(_wrap(f"Found : {f.detail}", indent=4))
-            L.append(_wrap(f"Why   : {f.why}", indent=4))
-            if f.math:
-                L.append(_wrap(f"Math  : {f.math}", indent=4))
-            L.append(_wrap(f"Fix   : {f.fix}", indent=4))
+                loc = f" | {f.file}" + (f":{f.line}" if f.line else "") if f.file else ""
+                L.append(f"\n[{f.rule_id}] {f.title}")
+                L.append(f"    Category: {f.category.value}{loc}")
+                L.append(_wrap(f"Basis : {_basis_phrase(f.basis)}", indent=4))
+                if f.basis is Basis.ASSUMED and f.assumes:
+                    L.append(_wrap(f"Assumes: {f.assumes} - if that is wrong, this "
+                                   f"finding does not apply.", indent=4))
+                L.append(_wrap(f"Found : {f.detail}", indent=4))
+                L.append(_wrap(f"Why   : {f.why}", indent=4))
+                if f.math:
+                    L.append(_wrap(f"Math  : {f.math}", indent=4))
+                L.append(_wrap(f"Fix   : {f.fix}", indent=4))
 
-    # ----- proof tables -------------------------------------------------------
-    L.append(_section("5. Mathematical proof tables"))
-    L.append(_wrap("Every table below derives its verdict from arithmetic on "
-                   "values found in YOUR files (estimates are labeled and "
-                   "conservative). Re-check any number by hand."))
-    if not result.proofs:
-        L.append("\n  (No workload/JVM pairs found to compute tables for.)")
-    for i, p in enumerate(result.proofs, 1):
-        L.append(f"\n{_hr('-')}")
-        L.append(f"TABLE {i}: {p.title}")
-        L.append(_hr("-"))
-        L.append(_wrap(p.intro))
-        L.append("")
-        L.append(_table(p.headers, p.rows))
-        L.append("")
-        L.append(_wrap("VERDICT: " + p.conclusion, indent=2))
+        # ----- proof tables ------------------------------------------------
+        L.append(sec("Mathematical proof tables"))
+        L.append(_wrap("Every table below derives its verdict from arithmetic on "
+                       "values found in YOUR files (estimates are labeled and "
+                       "conservative). Re-check any number by hand."))
+        if not result.proofs:
+            L.append("\n  (No workload/JVM pairs found to compute tables for.)")
+        for i, p in enumerate(result.proofs, 1):
+            L.append(f"\n{_hr('-')}")
+            L.append(f"TABLE {i}: {p.title}")
+            L.append(_hr("-"))
+            L.append(_wrap(p.intro))
+            L.append("")
+            L.append(_table(p.headers, p.rows))
+            L.append("")
+            L.append(_wrap("VERDICT: " + p.conclusion, indent=2))
 
-    # ----- education ----------------------------------------------------------
-    L.append(_section("6. Education appendix - why this math matters"))
-    L.append(_education())
+        # ----- verify on your cluster --------------------------------------
+        from .clusterprobes import build_probes
+        probes = build_probes(result)
+        if probes:
+            L.append(sec("Verify on your cluster - close the gaps static "
+                         "analysis can't"))
+            L.append(_wrap(
+                "This tool reads files, not a cluster. Each item below is a real "
+                "Kubernetes behaviour it cannot see from the chart; run the "
+                "command to close the gap, then read the result as described. "
+                "Only the checks relevant to THIS chart are shown; names and "
+                "selectors are filled in from your files where resolved "
+                "(placeholders like <namespace> are yours to substitute)."))
+            for p in probes:
+                L.append(f"\n{_hr('-')}")
+                L.append(f"[{p.key}] {p.title}")
+                L.append(_hr("-"))
+                L.append(_wrap(f"Gap  : {p.gap}", indent=4))
+                L.append("    Run  :")
+                for cmd in p.commands:
+                    L.append(f"        $ {cmd}")
+                L.append(_wrap(f"Read : {p.read}", indent=4))
 
-    # ----- methodology --------------------------------------------------------
-    L.append(_section("7. Methodology and limitations"))
+        # ----- external validators -----------------------------------------
+        if external:
+            L.append(sec("External validators - independent cross-check"))
+            L.append(_wrap(
+                "hpa-analyzer did not write these tools and does not vouch for "
+                "their output - it ran them and reports their exit status and "
+                "output verbatim. Absent tools show an install command. Tools "
+                "that need rendered manifests are skipped (with a reason) when "
+                "helm is unavailable to render."))
+            xrows = []
+            for e in external:
+                if not e.installed:
+                    status = "not installed"
+                elif not e.ran:
+                    status = "skipped"
+                else:
+                    status = "PASS" if e.ok else "FAIL"
+                xrows.append([e.name, status, e.summary])
+            L.append("")
+            L.append(_table(["Tool", "Status", "Result / reason"], xrows))
+            for e in external:
+                if e.detail and e.ran:
+                    L.append(f"\n  --- {e.name} output " + "-" * 40)
+                    for ln in e.detail.splitlines():
+                        L.append("  " + ln)
+                if not e.installed and e.install_hint:
+                    L.append(_wrap(f"install {e.name}: {e.install_hint}", indent=2))
+                L.append(_wrap(f"run it yourself: {e.manual_cmd}", indent=2))
+
+        # ----- education (only when teaching) ------------------------------
+        if teach:
+            L.append(sec("Education appendix - why this math matters"))
+            L.append(_education())
+
+    # ----- methodology (all levels) ----------------------------------------
+    L.append(sec("Methodology and limitations"))
     if ctx.render_mode == "helm":
         mode_para = (
             "Manifests were produced by `helm template` - the real template "

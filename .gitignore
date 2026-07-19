@@ -10,3 +10,7 @@ venv/
 
 # Generated analysis output
 hpa_analysis_report.txt
+
+# Agent / editor / test caches (local only)
+.claude/
+.pytest_cache/
