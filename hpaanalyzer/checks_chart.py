@@ -3,11 +3,20 @@
 import re
 from typing import Any
 
+from . import kubeversion as kv
 from .helmyaml import line_of, values_lookup
-from .kube import DEPRECATED_APIS, RECOMMENDED_LABELS, doc_name
-from .models import AnalysisResult, Category, ChartContext, Finding, Severity
+from .kube import (API_AVAILABLE_SINCE, DEPRECATED_APIS, RECOMMENDED_LABELS,
+                   doc_name)
+from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
+                     Severity)
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?$")
+
+# helm's compiled-in default and the capability-gate detector both live in
+# renderplan, next to the source quotations that justify them, so the rule and
+# its explanation cannot drift apart.
+from .renderplan import (HELM_DEFAULT_MINOR as _HELM_DEFAULT_MINOR,  # noqa: E402
+                         capability_gates)
 
 
 def run(ctx: ChartContext, result: AnalysisResult) -> None:
@@ -18,11 +27,254 @@ def run(ctx: ChartContext, result: AnalysisResult) -> None:
     _template_text(ctx, result)
     _api_versions(ctx, result)
     _labels(ctx, result)
+    _render_divergence(ctx, result)
+    _api_version_gate(ctx, result)
     _parse_errors(ctx, result)
 
 
 def _add(result, **kw):
     result.add(Finding(**kw))
+
+
+def _render_divergence(ctx, result):
+    """CH015: the chart emits different objects at different points inside
+    its OWN declared kubeVersion range.
+
+    Every static analysis of a Helm chart has to pick one cluster version to
+    reason about, and that pick is an implicit claim: that the answer does
+    not depend on the pick. discovery._probe_divergence tests the claim by
+    rendering at both ends of the declared range and diffing the emitted
+    (kind, name) sets. When they differ the claim is false, and the honest
+    thing is to say so rather than to pick a winner - because there is no
+    winner. The chart genuinely is two different charts depending on where it
+    lands, and the reader is the only one who knows which cluster they have.
+
+    Note what this rule does NOT fire on. Swapping `autoscaling/v2beta2` for
+    `autoscaling/v2` behind a `.Capabilities` test emits the same kind with
+    the same name at both versions, so it is not an object-identity
+    divergence; TP010/TP013 already cover apiVersion drift. This fires when
+    an object EXISTS at one version and not the other - a PodDisruptionBudget
+    that appears only above 1.21, an HPA that vanishes below 1.23 - because
+    that is the case where a whole object silently escapes analysis.
+    """
+    div = ctx.render_divergence
+    if not div:
+        return
+
+    if not div.get("checked"):
+        # C2.2: "we could not check" is not "we checked and it was fine".
+        # It gets an INFO so the gap is visible, not a silent pass.
+        _add(result, rule_id="CH015", severity=Severity.INFO,
+             category=Category.CHART,
+             title="Could not verify the chart renders consistently across "
+                   "its declared range",
+             file=ctx.chart_yaml_path or "",
+             detail=f"The chart rendered at {ctx.render_kube_version}, but the "
+                    f"comparison render at {div.get('probe')} (the bottom of "
+                    f"its declared kubeVersion range) failed: "
+                    f"{div.get('error')}.",
+             why="This report describes one cluster version. Whether it also "
+                 "describes the other end of the range is unknown - not "
+                 "confirmed. Treat the object set below as covering "
+                 f"{ctx.render_kube_version} only.",
+             fix=f"Run `helm template release-name <chart> --kube-version "
+                 f"{div.get('probe')}` by hand and compare the object list "
+                 f"with this report's.",
+             basis=Basis.OBSERVED)
+        return
+
+    if not div.get("diverges"):
+        return
+
+    only_at = div.get("only_at") or []
+    only_probe = div.get("only_at_probe") or []
+    bits = []
+    if only_at:
+        bits.append(f"only at {div['at']}: " + ", ".join(only_at))
+    if only_probe:
+        bits.append(f"only at {div['probe']}: " + ", ".join(only_probe))
+
+    _add(result, rule_id="CH015", severity=Severity.MEDIUM,
+         category=Category.CHART,
+         title="Chart emits different objects at different points in its own "
+               "declared kubeVersion range",
+         file=ctx.chart_yaml_path or "",
+         detail=(f"Rendered at {div['at']} ({div['n_at']} object(s)) and at "
+                 f"{div['probe']} ({div['n_probe']} object(s)); " +
+                 "; ".join(bits) + "."),
+         why="The chart branches on `.Capabilities` (KubeVersion or "
+             "APIVersions.Has), so `helm template` is a function of the "
+             "cluster version, not just of the chart. Every finding in this "
+             f"report was computed from the {div['at']} render, which means "
+             f"the objects listed as present only at {div['probe']} were "
+             "NEVER ANALYZED - no rule ran against them, and their absence "
+             "from the findings below is not evidence that they are clean. "
+             "This is the one case where a single-version report cannot be "
+             "complete, so it is stated rather than papered over.",
+         fix=f"Re-run with --kube-version set to the cluster you actually "
+             f"deploy to, and - if you support the whole declared range - run "
+             f"it once per end of the range and read both reports. If the "
+             f"branch is no longer needed, delete it and narrow kubeVersion "
+             f"instead: a range you do not test is a range you do not "
+             f"support.",
+         basis=Basis.OBSERVED)
+
+
+# ---------------------------------------------------------------------------
+# CH016: the chart's output depends on a question `helm template` answers
+# wrongly by construction.
+# ---------------------------------------------------------------------------
+
+def _gv_exists_at(gv: str, minor):
+    """Does group/version `gv` exist on a real cluster at `minor`?
+
+    Returns True / False / None, where None means "this tool has no recorded
+    fact about it" - a CRD, an aggregated API, or simply a group/version
+    missing from kube.py's tables. None is a real answer here and is reported
+    as such; guessing would be exactly the failure this rule exists to name.
+
+    `gv` may be "group/version" or helm's "group/version/Kind" form. For the
+    bare form the group/version is present if ANY kind in it is present, which
+    is what a real discovery call would report.
+    """
+    parts = gv.split("/")
+    kind = None
+    if len(parts) == 3:
+        gv, kind = f"{parts[0]}/{parts[1]}", parts[2].lower()
+    elif len(parts) == 2 and parts[0] in ("v1",):   # "v1/Pod" core-group form
+        gv, kind = parts[0], parts[1].lower()
+
+    kinds = {k[1] for k in API_AVAILABLE_SINCE if k[0] == gv}
+    kinds |= {k[1] for k in DEPRECATED_APIS if k[0] == gv}
+    if kind is not None:
+        kinds &= {kind}
+    if not kinds:
+        return None
+
+    for k in kinds:
+        since = API_AVAILABLE_SINCE.get((gv, k))
+        fact = DEPRECATED_APIS.get((gv, k))
+        if since is not None and minor < since:
+            continue
+        if fact is not None and minor >= fact.removed_in:
+            continue
+        return True
+    return False
+
+
+def _api_version_gate(ctx, result):
+    """CH016: withhold confidence in branches gated on `.Capabilities.APIVersions`.
+
+    This is the companion to CH015 and it fires on the case CH015 provably
+    CANNOT catch. CH015 renders at both ends of the declared range and diffs
+    the objects; a chart gated on APIVersions.Has emits an IDENTICAL object
+    set at both ends, so CH015 stays silent - and the silence means "helm gave
+    the same answer twice", not "the branch is version-independent".
+
+    The reason, established by reading helm and then by running it rather than
+    by recollection (hpaanalyzer/renderplan.py carries the full quotation):
+
+        DefaultVersionSet = allKnownVersions()            // capabilities.go
+        func allKnownVersions() VersionSet {
+            groups := scheme.Scheme.PrioritizedVersionsAllGroups()
+
+    That is every group/version compiled into the helm binary's vendored
+    client-go. It is not a function of --kube-version and it is not a function
+    of any cluster. Probed against helm v3.16 at three versions:
+
+        APIVersions.Has "autoscaling/v2"       true at 1.16, 1.21 and 1.32
+        APIVersions.Has "autoscaling/v2beta1"  true at 1.16, 1.21 and 1.32
+
+    autoscaling/v2 first exists in 1.23; v2beta1 was removed in 1.26. No
+    cluster has ever had both. So the set describes an impossible cluster, and
+    it fails in BOTH directions: a built-in group answers true on clusters
+    that never had it, and a CRD group answers false on clusters that do have
+    it, because CRDs are not compiled into helm. And `--api-versions` only
+    APPENDS (pkg/action/install.go), so there is no invocation that removes an
+    entry and no way for any caller to correct either error.
+
+    What this rule therefore does NOT do is guess which branch is right and
+    report it. It reports that the rendered branch is not evidence. Severity
+    is INFO on purpose and permanently: the chart is not doing anything wrong
+    - `.Capabilities.APIVersions.Has` is the documented, recommended idiom and
+    is answered correctly by a real `helm install` against a real cluster.
+    The defect is in this tool's line of sight, so it costs the chart nothing.
+    Withholding a claim never becomes asserting a finding.
+    """
+    hits = capability_gates(ctx.template_raw)   # (file, line, gv|None)
+    if not hits:
+        return
+
+    rendered = ctx.render_mode.startswith("helm")
+    minor = None
+    at = ctx.render_kube_version
+    if rendered:
+        v = kv.parse_version(at) if at else None
+        minor = (v.major, v.minor) if v else _HELM_DEFAULT_MINOR
+        at = at or f"v{_HELM_DEFAULT_MINOR[0]}.{_HELM_DEFAULT_MINOR[1]}.0 " \
+                   f"(helm's compiled-in default)"
+
+    files = sorted({p for p, _l, _g in hits})
+    gvs = sorted({g for _p, _l, g in hits if g})
+
+    # The concrete, checkable half: a queried group/version that this tool
+    # KNOWS does not exist at the version the render claims to be.
+    impossible = []
+    if minor is not None:
+        for gv in gvs:
+            if _gv_exists_at(gv, minor) is False:
+                impossible.append(gv)
+
+    detail = (f"{len(hits)} `.Capabilities.APIVersions` test(s) in " +
+              ", ".join(files) +
+              (f"; queried: {', '.join(gvs)}" if gvs else "") + ".")
+    if rendered:
+        detail += (f" This report was computed from a single render at {at}, "
+                   f"so exactly one arm of each of those branches was "
+                   f"analyzed.")
+    else:
+        detail += (" This report was computed by static scrubbing, which does "
+                   "not evaluate the branch at all.")
+    if impossible:
+        verb = "does" if len(impossible) == 1 else "do"
+        detail += (f" {', '.join(impossible)} {verb} not exist on a real {at} "
+                   f"cluster at all, yet helm's APIVersions set is built from "
+                   f"its own compiled-in scheme rather than from the version, "
+                   f"so the render's answer for it is unrelated to the truth "
+                   f"about that cluster.")
+
+    fix_line = ("Decide which arm applies to the cluster you deploy to and "
+                "read this report against that arm. To make the analysis "
+                "cover the other arm, render it yourself and inspect it, or "
+                "replace the capability test with a version test - "
+                "`semverCompare \">=1.23-0\" .Capabilities.KubeVersion.Version` "
+                "- which IS controlled by --kube-version and which this tool "
+                "then follows correctly. Note that a version test is only "
+                "equivalent for built-in APIs; for a CRD the capability test "
+                "is the correct idiom and this limitation simply stands.")
+
+    _add(result, rule_id="CH016", severity=Severity.INFO,
+         category=Category.CHART,
+         title="Rendered branch not verifiable: chart gates on "
+               "`.Capabilities.APIVersions`",
+         file=files[0] if len(files) == 1 else "",
+         line=hits[0][1] if len(files) == 1 else None,
+         detail=detail,
+         why="`helm template` does not answer `.Capabilities.APIVersions.Has` "
+             "from your cluster. It answers from the set of group/versions "
+             "compiled into the helm binary, which is the same at every "
+             "--kube-version - verified by probing helm v3.16 at 1.16, 1.21 "
+             "and 1.32, where `autoscaling/v2` and `autoscaling/v2beta1` are "
+             "both true despite never having coexisted on any real cluster. "
+             "Built-in groups therefore answer true on clusters that never "
+             "had them, and CRD groups answer false on clusters that do have "
+             "them. `--api-versions` can only append, so no invocation fixes "
+             "either. This tool states that the branch is unverified rather "
+             "than reporting the arm helm happened to take as fact; the "
+             "findings below describe that arm only, and the other arm was "
+             "never analyzed.",
+         fix=fix_line,
+         basis=Basis.OBSERVED)
 
 
 def _multi_chart(ctx, result):
@@ -141,15 +393,7 @@ def _chart_yaml(ctx, result):
              why="Ownership metadata matters once a chart is shared beyond one team.",
              fix="Add maintainers with name/email.")
 
-    if not c.get("kubeVersion"):
-        _add(result, rule_id="CH010", severity=Severity.LOW, category=Category.CHART,
-             title="No kubeVersion constraint", file=f,
-             detail="kubeVersion is not set.",
-             why="Without a kubeVersion constraint the chart will happily install "
-                 "onto clusters whose APIs it does not support (e.g. autoscaling/v2 "
-                 "requires Kubernetes >= 1.23), failing at apply time instead of "
-                 "install time.",
-             fix='Add e.g. kubeVersion: ">=1.23.0-0".')
+    _kube_version(ctx, result, c, f)
 
     if c.get("icon") is None and c.get("home") is None and c.get("sources") is None:
         _add(result, rule_id="CH011", severity=Severity.INFO, category=Category.CHART,
@@ -327,24 +571,354 @@ def _template_text(ctx, result):
                  fix="Parameterize the tag through values with an immutable default.")
 
 
-def _api_versions(ctx, result):
+# ---------------------------------------------------------------------------
+# kubeVersion: the chart's own statement of which clusters it targets.
+#
+# Helm does not treat this field as documentation. pkg/action/action.go
+# renderResources() (v3.16.4):
+#
+#     if ch.Metadata.KubeVersion != "" {
+#         if !chartutil.IsCompatibleRange(ch.Metadata.KubeVersion, caps.KubeVersion.String()) {
+#             return ..., errors.Errorf("chart requires kubeVersion: %s which is
+#                 incompatible with Kubernetes %s", ...)
+#         }
+#     }
+#
+# So the constraint is executable. That is what licenses the checks below to
+# let severity depend on it: an author who narrows kubeVersion until a removed
+# API is out of scope has not silenced the tool, they have made helm refuse the
+# install that would have failed. Caveat worth knowing and stated in the
+# findings: `helm template | kubectl apply` bypasses this gate entirely.
+# ---------------------------------------------------------------------------
+
+
+def _implied_range(ctx):
+    """The kubeVersion this chart's own manifests imply.
+
+    Returns (floor, floor_src, ceiling, ceiling_src) as (major, minor) pairs.
+    floor is the newest 'available since' among the APIs the chart uses;
+    ceiling is the oldest removal among them. Both are computed from the
+    chart's actual contents, because advice like 'add kubeVersion: ">=1.23"'
+    that ignores what the chart ships is a guess wearing a fact's clothes.
+
+    An apiVersion that appears in neither table contributes nothing rather
+    than a guessed bound (contract C2.2: an undetermined quantity must not
+    silently contribute).
+    """
+    floor = ceiling = None
+    floor_src = ceiling_src = None
     for doc in ctx.docs:
         if not doc.kind or not doc.api_version:
             continue
         key = (doc.api_version, doc.kind.lower())
-        if key in DEPRECATED_APIS:
-            removed_in, replacement = DEPRECATED_APIS[key]
-            ln = line_of(ctx.template_raw.get(doc.file, ""),
-                         r"apiVersion:\s*" + re.escape(doc.api_version))
-            _add(result, rule_id="TP010", severity=Severity.CRITICAL, category=Category.TEMPLATES,
-                 title=f"Deprecated/removed apiVersion for {doc.kind}", file=doc.file,
-                 line=ln,
-                 detail=f"{doc.kind} '{doc_name(doc)}' uses apiVersion "
-                        f"{doc.api_version}, removed in Kubernetes {removed_in}.",
-                 why=f"On clusters >= {removed_in} the API server rejects this "
-                     f"object outright: helm upgrade fails and the release can get "
-                     f"stuck (existing release manifests reference dead APIs).",
-                 fix=f"Move to {replacement} and adjust the spec to the new schema.")
+        since = API_AVAILABLE_SINCE.get(key)
+        if since is not None and (floor is None or since > floor):
+            floor, floor_src = since, f"{doc.api_version} {doc.kind}"
+        fact = DEPRECATED_APIS.get(key)
+        if fact is not None and (ceiling is None or fact.removed_in < ceiling):
+            ceiling, ceiling_src = fact.removed_in, f"{doc.api_version} {doc.kind}"
+    return floor, floor_src, ceiling, ceiling_src
+
+
+def _kube_version_fix(ctx):
+    """The concrete kubeVersion line to add, derived from the chart."""
+    floor, floor_src, ceiling, ceiling_src = _implied_range(ctx)
+    fm = kv.fmt_minor
+    if floor and ceiling and floor >= ceiling:
+        return ("This chart's own manifests admit no consistent range: "
+                f"{floor_src} needs Kubernetes >= {fm(floor)}, but "
+                f"{ceiling_src} was removed in {fm(ceiling)}. Migrate the "
+                "removed API first (see the TP010 findings), then set "
+                f'kubeVersion: ">={fm(floor)}.0-0".')
+    if floor and ceiling:
+        return (f'Add kubeVersion: ">={fm(floor)}.0-0 <{fm(ceiling)}.0-0". '
+                f"The floor comes from {floor_src} (available since "
+                f"{fm(floor)}) and the ceiling from {ceiling_src} (removed in "
+                f"{fm(ceiling)}) - both read off this chart's own templates. "
+                "The '-0' suffixes are load-bearing; see CH014.")
+    if floor:
+        return (f'Add kubeVersion: ">={fm(floor)}.0-0". The floor comes from '
+                f"{floor_src}, which this chart uses and which does not exist "
+                f"before Kubernetes {fm(floor)}. The '-0' suffix is "
+                "load-bearing; see CH014.")
+    if ceiling:
+        return (f'Add kubeVersion: "<{fm(ceiling)}.0-0", because {ceiling_src} '
+                f"is gone from {fm(ceiling)} onward - or better, migrate that "
+                "API (see the TP010 findings) and declare a floor instead.")
+    return ('Add a kubeVersion range, e.g. kubeVersion: ">=1.23.0-0". No '
+            "bound could be derived from this chart's own apiVersions, so "
+            "that figure is an example, not a measurement: pick the oldest "
+            "cluster you actually intend to support.")
+
+
+def _kube_version(ctx, result, c, f):
+    raw = c.get("kubeVersion")
+    rng = kv.declared_range(raw)
+
+    if not rng.declared:
+        _add(result, rule_id="CH010", severity=Severity.LOW, category=Category.CHART,
+             title="No kubeVersion constraint", file=f,
+             detail="kubeVersion is not set.",
+             why="Without a kubeVersion constraint the chart will happily install "
+                 "onto clusters whose APIs it does not support (e.g. autoscaling/v2 "
+                 "requires Kubernetes >= 1.23), failing at apply time instead of "
+                 "install time. It also leaves this analyzer unable to tell an "
+                 "obsolete apiVersion from a merely old one, so every such finding "
+                 "has to be reported at its worst-case severity.",
+             fix=_kube_version_fix(ctx))
+        return
+
+    if not rng.parsed:
+        _add(result, rule_id="CH013", severity=Severity.CRITICAL, category=Category.CHART,
+             title="kubeVersion does not parse - chart installs on no cluster",
+             file=f, line=line_of(ctx.chart_yaml_raw, r"kubeVersion:"),
+             detail=f"kubeVersion: {rng.raw!r} is not a valid SemVer constraint "
+                    f"({rng.error}).",
+             why="helm/pkg/chartutil/compatible.go:IsCompatibleRange returns FALSE "
+                 "when the constraint fails to parse - it does not skip the check. "
+                 "So a typo here does not weaken the gate, it closes it: "
+                 "'helm install' refuses on every cluster version with 'chart "
+                 "requires kubeVersion: ... which is incompatible with Kubernetes "
+                 "...'. This is silent in review because Chart.yaml still looks "
+                 "like it says something reasonable.",
+             fix="Use SemVer constraint syntax, e.g. '>=1.24.0-0 <1.31.0-0'. AND "
+                 "is a space or a comma, OR is '||'; words like 'and' and version "
+                 "strings like '1,24' do not parse.")
+        return
+
+    if not rng.minors and rng.above_domain:
+        # NOT CH013. CH013 says "satisfiable by nothing", and here the
+        # constraint is satisfiable - just not by any version this analyzer
+        # sampled, or by any version Kubernetes has shipped. Reporting the
+        # sampling horizon as a property of the constraint would be exactly
+        # the C2.2 conflation the tool exists to avoid, and the FIX differs:
+        # reversed bounds vs a floor that does not exist yet.
+        # Two edges, two sentences. Saying "above 1.60" about a `>=2.0.0-0`
+        # chart would be a precise-sounding falsehood, and the whole point of
+        # splitting CH017 off CH013 was to stop emitting those.
+        if rng.above_domain_edge == kv.AboveDomain.MAJOR:
+            where = ("only by Kubernetes 2.0 and later, and no 2.x has ever "
+                     "been released")
+            more = (f"This analyzer enumerates 1.0 through "
+                    f"1.{kv.DOMAIN_MAX_MINOR}; the constraint is outside that "
+                    f"on the MAJOR axis, not merely past the horizon.")
+            advice = ("Kubernetes has been 1.x for its whole history and the "
+                      "project has announced no 2.0. A '2' in a kubeVersion "
+                      "floor is almost always a typo for a 1.x minor, or a "
+                      "placeholder that was never filled in. Replace it with "
+                      "the oldest 1.x you actually support.")
+        else:
+            where = f"only by versions above 1.{kv.DOMAIN_MAX_MINOR}"
+            more = ("That is past this analyzer's sampling horizon AND past "
+                    "every Kubernetes release to date.")
+            advice = (f"Check the floor digit-by-digit. If a future version "
+                      f"really is intended, note that this analyzer only "
+                      f"enumerates up to 1.{kv.DOMAIN_MAX_MINOR} and will not "
+                      f"reason about the range beyond it.")
+        _add(result, rule_id="CH017", severity=Severity.CRITICAL,
+             category=Category.CHART,
+             title="kubeVersion floor is above every Kubernetes release "
+                   "that exists",
+             file=f, line=line_of(ctx.chart_yaml_raw, r"kubeVersion:"),
+             detail=f"kubeVersion: {rng.raw!r} parses and is satisfiable, but "
+                    f"{where}. {more} This is NOT the claim that the "
+                    f"constraint is contradictory (see CH013 for that); it is "
+                    f"the claim that nothing shipped satisfies it.",
+             why="helm/pkg/chartutil/compatible.go:IsCompatibleRange compares "
+                 "the constraint against the cluster's real version, so a "
+                 "floor no released cluster reaches refuses 'helm install' "
+                 "everywhere today - with the same error a reversed range "
+                 "produces, which is why they are easy to confuse. The usual "
+                 "cause is a typo (1.61 for 1.16, 2.0 or 1.99 as a "
+                 "placeholder) rather than a deliberate future pin.",
+             fix=advice)
+        return
+
+    if not rng.minors:
+        _add(result, rule_id="CH013", severity=Severity.CRITICAL, category=Category.CHART,
+             title="kubeVersion matches no Kubernetes version",
+             file=f, line=line_of(ctx.chart_yaml_raw, r"kubeVersion:"),
+             detail=f"kubeVersion: {rng.raw!r} parses, but no Kubernetes 1.x "
+                    f"release satisfies it (checked 1.0 through "
+                    f"1.{kv.DOMAIN_MAX_MINOR}, and probed above that horizon "
+                    f"too - it admits nothing there either).",
+             why="The constraint is satisfiable by nothing, so IsCompatibleRange is "
+                 "false everywhere and helm refuses to install the chart on any "
+                 "cluster. This is usually a reversed or overlapping pair of "
+                 "bounds, e.g. '>=1.30.0-0 <1.20.0-0'.",
+             fix="Check the bounds are the right way round and that they overlap.")
+        return
+
+    if not rng.accepts_prerelease:
+        _add(result, rule_id="CH014", severity=Severity.MEDIUM, category=Category.CHART,
+             title="kubeVersion excludes every managed cluster",
+             file=f, line=line_of(ctx.chart_yaml_raw, r"kubeVersion:"),
+             detail=f"kubeVersion: {rng.raw!r} has no prerelease comparator, so it "
+                    f"does not match version strings like 'v1.29.3-gke.1093000', "
+                    f"'v1.30.0-eks-a5ec690' or 'v1.28.9-aks1'.",
+             why="GKE, EKS and AKS report gitVersions that are SemVer PRERELEASES, "
+                 "and Masterminds/semver - the library helm uses - excludes "
+                 "prerelease versions from any constraint whose comparators carry "
+                 "no prerelease part. The effect is not 'slightly stricter': "
+                 "'>=1.29.0' matches no GKE cluster at any version, so the chart "
+                 "fails to install on every managed cluster while working fine on "
+                 "kubeadm and kind.",
+             fix="Append '-0' to the lower bound(s): '>=1.29.0' becomes "
+                 "'>=1.29.0-0', which is the lowest possible 1.29.0 prerelease and "
+                 "so admits '-gke.N' and '-eks-N' builds.")
+
+
+def _api_versions(ctx, result):
+    # ctx.chart may be a list or a bare scalar (CH012); a wrong-shaped
+    # Chart.yaml must not turn a template check into a traceback.
+    chart = ctx.chart if isinstance(ctx.chart, dict) else {}
+    rng = kv.declared_range(chart.get("kubeVersion"))
+    for doc in ctx.docs:
+        if not doc.kind or not doc.api_version:
+            continue
+        key = (doc.api_version, doc.kind.lower())
+        fact = DEPRECATED_APIS.get(key)
+        if fact is not None:
+            _api_removed(ctx, result, doc, fact, rng)
+        since = API_AVAILABLE_SINCE.get(key)
+        if since is not None:
+            _api_too_new(ctx, result, doc, since, rng)
+
+
+def _api_removed(ctx, result, doc, fact, rng):
+    """TP010, reconciled against the chart's declared cluster range.
+
+    Before R3 this was CRITICAL unconditionally. That made the fix-first list
+    stop being an order: a chart pinned to 1.20-1.21 shipping a
+    networking.k8s.io/v1beta1 Ingress - which works on every cluster it claims
+    to support, and which helm will refuse to install anywhere else - sat at
+    the same severity as a chart pinned >=1.33 shipping batch/v1beta1 CronJob,
+    which cannot work anywhere. Both are worth reporting. They are not worth
+    reporting identically.
+    """
+    ln = line_of(ctx.template_raw.get(doc.file, ""),
+                 r"apiVersion:\s*" + re.escape(doc.api_version))
+    removed = kv.fmt_minor(fact.removed_in)
+    title = f"Deprecated/removed apiVersion for {doc.kind}"
+    base = (f"{doc.kind} '{doc_name(doc)}' uses apiVersion {doc.api_version}, "
+            f"removed in Kubernetes {removed}.")
+    fix = f"Move to {fact.replacement} and adjust the spec to the new schema."
+    if fact.replacement_since:
+        fix += (f" {fact.replacement} exists from Kubernetes "
+                f"{kv.fmt_minor(fact.replacement_since)} onward.")
+    if fact.note:
+        fix += " " + fact.note
+
+    if not rng.known:
+        if not rng.declared:
+            why_range = "Chart.yaml declares no kubeVersion"
+        elif not rng.parsed:
+            why_range = f"kubeVersion {rng.raw!r} does not parse (see CH013)"
+        else:
+            why_range = (f"kubeVersion {rng.raw!r} matches no cluster version "
+                         f"(see CH013)")
+        _add(result, rule_id="TP010", severity=Severity.CRITICAL,
+             category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
+             detail=base + f" {why_range}, so the clusters this chart may reach "
+                           f"are unknown and nothing stops it reaching one at or "
+                           f"above {removed}.",
+             why=f"On clusters >= {removed} the API server rejects this object "
+                 f"outright: helm upgrade fails and the release can get stuck "
+                 f"(existing release manifests reference dead APIs). This is "
+                 f"reported at the top severity because the cluster range is "
+                 f"undetermined, which is the conservative reading - not because "
+                 f"the failure has been confirmed for your cluster.",
+             fix=fix + " Declaring kubeVersion (CH010) would also let this "
+                       "analyzer rank the finding instead of assuming the worst.")
+        return
+
+    above = rng.at_or_above(*fact.removed_in)
+    below = rng.below(*fact.removed_in)
+
+    if above and not below:
+        _add(result, rule_id="TP010", severity=Severity.CRITICAL,
+             category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
+             detail=base + f" The chart's kubeVersion ({rng.raw}) admits "
+                           f"{rng.describe()} - every one of those is at or above "
+                           f"{removed}.",
+             why=f"This is not a portability note. On EVERY cluster this chart "
+                 f"claims to support the API server rejects the object, so the "
+                 f"chart passes helm's kubeVersion gate and then fails at apply "
+                 f"time. There is no cluster on which this chart works as "
+                 f"declared.",
+             fix=fix)
+    elif above and below:
+        _add(result, rule_id="TP010", severity=Severity.HIGH,
+             category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
+             detail=base + f" The chart's kubeVersion ({rng.raw}) admits "
+                           f"{rng.describe()}, which straddles the removal: "
+                           f"{kv.fmt_minor(below[0])}-{kv.fmt_minor(below[-1])} "
+                           f"still serve this API, "
+                           f"{kv.fmt_minor(above[0])}-{kv.fmt_minor(above[-1])} "
+                           f"do not.",
+             why=f"The chart installs and works on the older part of its own "
+                 f"declared range and fails at apply time on the newer part. "
+                 f"That is the shape of a defect that passes CI on one cluster "
+                 f"and takes down another.",
+             fix=fix + f" If migrating is not possible yet, narrowing kubeVersion "
+                       f"below {removed} is a real fix and not a workaround: helm "
+                       f"will then refuse the installs that would have failed.")
+    else:
+        _add(result, rule_id="TP010", severity=Severity.LOW,
+             category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
+             detail=base + f" The chart's kubeVersion ({rng.raw}) admits only "
+                           f"{rng.describe()}, all below {removed}, so this API "
+                           f"exists on every cluster the chart claims to support.",
+             why=f"Helm refuses to install this chart on a cluster >= {removed} "
+                 f"(IsCompatibleRange is enforced at render time), so the removal "
+                 f"cannot surface as an outage while the constraint stands. What "
+                 f"remains is an upgrade blocker: the cluster will reach "
+                 f"{removed} before this chart can.",
+             fix=fix + " Nothing breaks today; do this before raising "
+                       "kubeVersion.")
+
+
+def _api_too_new(ctx, result, doc, since, rng):
+    """TP013: the API is not old enough for the range the chart declares.
+
+    The mirror image of TP010, and it did not exist before R3 even though
+    CH010's own 'why' text cites it verbatim ('autoscaling/v2 requires
+    Kubernetes >= 1.23') as the reason to set a constraint. The tool advised
+    setting a constraint to prevent a failure it then never checked for.
+
+    Only fires when the declared range is known: with no kubeVersion there is
+    no claim to contradict, and inventing one would be a guess.
+    """
+    if not rng.known:
+        return
+    missing = rng.below(*since)
+    if not missing:
+        return
+    ln = line_of(ctx.template_raw.get(doc.file, ""),
+                 r"apiVersion:\s*" + re.escape(doc.api_version))
+    s = kv.fmt_minor(since)
+    span = (f"{kv.fmt_minor(missing[0])}-{kv.fmt_minor(missing[-1])}"
+            if missing[0] != missing[-1] else kv.fmt_minor(missing[0]))
+    everywhere = len(missing) == len(rng.minors)
+    _add(result, rule_id="TP013",
+         severity=Severity.CRITICAL if everywhere else Severity.HIGH,
+         category=Category.TEMPLATES,
+         title=f"apiVersion is newer than the declared kubeVersion floor "
+               f"({doc.kind})",
+         file=doc.file, line=ln,
+         detail=f"{doc.kind} '{doc_name(doc)}' uses apiVersion "
+                f"{doc.api_version}, which first exists in Kubernetes {s}. The "
+                f"chart's kubeVersion ({rng.raw}) admits {rng.describe()}, "
+                f"including {span} where this API is absent"
+                + (" - that is every version the chart claims to support."
+                   if everywhere else "."),
+         why=f"helm's kubeVersion gate passes, because the chart says it "
+             f"supports those clusters. Install therefore proceeds and the API "
+             f"server rejects the object at apply time with 'no matches for "
+             f"kind' - a half-applied release, which is the exact failure the "
+             f"kubeVersion field exists to prevent.",
+         fix=f'Raise the floor to at least ">={s}.0-0", or use an apiVersion '
+             f"that exists on {kv.fmt_minor(rng.floor)}.")
 
 
 def _labels(ctx, result):

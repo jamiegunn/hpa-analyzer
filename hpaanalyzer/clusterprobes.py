@@ -14,7 +14,7 @@ Everything here is advisory text; nothing is executed.
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from .kube import containers, doc_name, pod_spec
+from .kube import containers, doc_name, jvm_evidence, pod_spec
 from .models import AnalysisResult, ChartContext
 
 NS = "<namespace>"          # the namespace you install the release into
@@ -173,12 +173,23 @@ def build_probes(result: AnalysisResult) -> List[ClusterProbe]:
 
     # 4. Native sidecars / multi-container pod QoS ------------------------
     if _has_multi_container(ctx) or _has_native_sidecar(ctx):
-        why = ("This report shows QoS per container; Kubernetes assigns QoS "
-               "per POD.")
+        # This text used to read "This report shows QoS per container;
+        # Kubernetes assigns QoS per POD" - which was true of the tool before
+        # R1 and false after it. A probe that tells the user the report is
+        # wrong about something the report now gets right is its own kind of
+        # misinformation, and it survived two iterations because nothing
+        # tested the prose. The probe is still worth printing: the tool
+        # computes QoS from the templates, and only the cluster can confirm
+        # what was actually admitted.
+        why = ("This report computes pod QoS from the templates by porting "
+               "upstream ComputePodQOS; the cluster computes it from the pod "
+               "that was actually admitted, after defaulting, LimitRange "
+               "injection and any mutating webhook.")
         if _has_native_sidecar(ctx):
-            why += (" Restartable init containers (native sidecars) also add "
-                    "their requests to the node's allocation, which the "
-                    "budget math does not yet count.")
+            why += (" Restartable init containers (native sidecars) count "
+                    "toward both the pod's QoS and the node's allocation - "
+                    "this report sums them, and the node view below is how "
+                    "you check that against reality.")
         probes.append(ClusterProbe(
             "pod-qos", "What is the POD's real QoS and footprint?",
             why,
@@ -186,9 +197,12 @@ def build_probes(result: AnalysisResult) -> List[ClusterProbe]:
              f"-o jsonpath='{{range .items[*]}}{{.metadata.name}}{{\"  \"}}"
              f"{{.status.qosClass}}{{\"\\n\"}}{{end}}'",
              f"kubectl describe node <node>   # see 'Allocated resources'"],
-            "`status.qosClass` is the authoritative pod QoS - trust it over "
-            "the per-container rows. Sidecar requests appear in the node's "
-            "Allocated resources; include them when sizing nodes.",
+            "`status.qosClass` is the authoritative pod QoS - it is what the "
+            "kubelet wrote for the pod that exists. If it disagrees with the "
+            "POD row in TABLE 1, something between the chart and the cluster "
+            "changed the pod (a LimitRange default, an injected sidecar) and "
+            "the difference is the finding. Sidecar requests appear in the "
+            "node's Allocated resources; include them when sizing nodes.",
             triggered_by=["multi-container pod"]))
 
     # 5. ResourceQuota (any graded workload) ------------------------------
@@ -204,8 +218,29 @@ def build_probes(result: AnalysisResult) -> List[ClusterProbe]:
             triggered_by=["workload present"]))
 
     # 6. Does the JVM actually see the container limit? -------------------
-    java = any(d.java_major or d.jvm_flags or d.java_opts for d in ctx.dockerfiles)
-    if java or (ids & {"JV010", "JV011", "JV013", "JV021", "XF001", "XF002", "XF003"}):
+    #
+    # R8, ninth site. This read `any(d.java_major or d.jvm_flags or
+    # d.java_opts for d in ctx.dockerfiles)` - a JVM test that only ever
+    # looked inside Dockerfiles. Measured on three charts:
+    #
+    #   pod spec sets JAVA_TOOL_OPTIONS=-Xmx1g, no Dockerfile  -> no probe
+    #   the same, plus an unrelated `FROM nginx` file          -> no probe
+    #   a pure nginx pod, chart ships a Java Dockerfile        -> PROBE
+    #
+    # Exactly inverted. And of all the probes here this is the worst one to
+    # get wrong, because it is the one the operator cannot answer any other
+    # way: whether the JVM sees the cgroup limit depends on the JDK build and
+    # the node's cgroup version, neither of which is in any file. A container
+    # that says `-Xmx1g` in its own pod spec is the clearest possible signal
+    # that this question applies, and it was the case that got silence.
+    #
+    # The `ids &` clause below is not a safety net for that. It fires only
+    # when a JVM finding was already raised - so it covers the chart whose
+    # heap is visibly wrong and misses the chart whose files look fine, which
+    # is precisely the chart whose only remaining risk is what the runtime
+    # does with the limit.
+    jvm_ev = jvm_evidence(ctx)
+    if jvm_ev or (ids & {"JV010", "JV011", "JV013", "JV021", "XF001", "XF002", "XF003"}):
         pod_sel = sel_arg or " <pod>"
         example_pod = (f"$(kubectl get pod -n {NS}{sel_arg} "
                        f"-o name | head -1)" if sel else f"{REL}-<pod>")
@@ -225,7 +260,12 @@ def build_probes(result: AnalysisResult) -> List[ClusterProbe]:
             "JVM is sizing from the host (old JDK or cgroup-v2 blindness). "
             "`cgroup2fs` confirms a v2 node; verify your JDK supports it "
             "(8u372+ / 11.0.16+ / 15+).",
-            triggered_by=["JVM detected"]))
+            # Say WHY this probe is here. "JVM detected" is an assertion the
+            # reader cannot check; the sentence that produced it is one they
+            # can - and if the inference is wrong, quoting it is how they
+            # find out.
+            triggered_by=[f"JVM detected: {jvm_ev[0]}" if jvm_ev
+                          else "a JVM finding was raised on this chart"]))
 
     # 7. Resolve template names for the commands above (static mode) ------
     names_are_placeholders = any(

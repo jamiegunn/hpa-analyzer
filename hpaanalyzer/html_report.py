@@ -13,9 +13,11 @@ from typing import List, Optional
 
 from . import __version__
 from .clusterprobes import build_probes
+from .kube import jvm_evidence
 from .models import AnalysisResult, Basis, Severity
-from .report import _education
-from .scoring import WEIGHTS, category_scores, grade, overall_score
+from .report import _education, undetermined_fit_lines
+from .scoring import (WEIGHTS, category_scores, coverage, grade,
+                      overall_score)
 
 _SEV_COLOR = {
     "CRITICAL": "#b3261e", "HIGH": "#c25e00", "MEDIUM": "#8a6d00",
@@ -54,9 +56,15 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
                    "#c25e00" if score is not None and score >= 60 else
                    "#b3261e" if score is not None else "#5f6368")
     P.append("<header>")
+    cov = coverage(result)
+    # The badge is the one element a reader will screenshot and paste into a
+    # ticket, so the denominator has to be ON it, not two sections below.
+    badge_sub = ("" if score is None else
+                 f"{score:.0f}/100" if cov.complete else
+                 f"{score:.0f}/100 &middot; {cov.n_assessed}/{cov.n_total} cats")
     P.append(f"<div class=grade style='background:{badge_color}'>"
              f"{'NOT GRADED' if score is None else g}<span>"
-             f"{'' if score is None else f'{score:.0f}/100'}</span></div>")
+             f"{badge_sub}</span></div>")
     P.append("<div class=hmeta>")
     P.append(f"<h1>Helm / Kubernetes / JVM quality report</h1>")
     P.append(f"<div class=sub>{_e(chart.get('name','(no chart)'))} "
@@ -105,6 +113,11 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
         P.append("</ol>")
     else:
         P.append("<p>No critical or high findings.</p>")
+    # C2.5 in the HTML, for the same reason it is in the terminal block: the
+    # three surfaces have to agree, and "no findings" beside an unanswerable
+    # OOM question reads as a pass on all three.
+    for line in undetermined_fit_lines(result):
+        P.append(f"<p class=warn>{_e(line)}</p>")
     P.append("</section>")
 
     # ---- coverage --------------------------------------------------------
@@ -125,11 +138,30 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
                        for s in (Severity.CRITICAL, Severity.HIGH,
                                  Severity.MEDIUM, Severity.LOW)
                        if any(f.severity is s for f in cfind)) or "-"
-        rows.append([cat.value, "N/A" if cscore is None else f"{cscore:.1f}",
-                     "N/A" if cscore is None else grade(cscore),
+        rows.append([cat.value,
+                     "not assessed" if cscore is None else f"{cscore:.1f}",
+                     "-" if cscore is None else grade(cscore),
                      str(WEIGHTS[cat]), by])
     P.append(_html_table(["Category", "Score", "Grade", "Weight", "C/H/M/L"],
                          rows))
+    if cov.unassessed:
+        P.append("<p class=note><b>Not assessed, and why:</b></p><ul>")
+        for cat, reason in cov.unassessed:
+            P.append(f"<li>{_e(cat.value)} &mdash; {_e(reason)}</li>")
+        P.append("</ul>")
+        P.append(f"<p class=note><b>{_e(cov.one_line())}</b> An unassessed "
+                 "category is not scored 0 and not scored 100 &mdash; there is "
+                 "no honest number for 'not looked at' &mdash; so it leaves "
+                 "the weighted mean entirely, numerator and denominator "
+                 "together. That renormalises the rest: on one of this "
+                 "project's own fixtures, deleting the Dockerfile RAISED the "
+                 "score by 4.4 points with every Kubernetes manifest "
+                 "byte-identical. Compare this score only against runs whose "
+                 "assessed set matches.</p>")
+    P.append("<p class=note>The score is a weighted count of what this tool "
+             "found, not an estimate of risk. Each category starts at 100 and "
+             "loses points per finding (CRITICAL -25, HIGH -12, MEDIUM -6, "
+             "LOW -3, INFO -0).</p>")
     P.append("</section>")
 
     # ---- findings --------------------------------------------------------
@@ -199,7 +231,8 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
     # ---- education (collapsed) ------------------------------------------
     P.append("<section id=education><h2>Education appendix</h2>")
     P.append("<details><summary>Show the HPA / JVM-in-container primer</summary>"
-             "<pre class=edu>" + _e(_education()) + "</pre></details></section>")
+             "<pre class=edu>" + _e(_education(jvm_evidence(ctx)))
+             + "</pre></details></section>")
 
     # ---- methodology -----------------------------------------------------
     P.append("<section id=methodology><h2>Methodology &amp; limitations</h2>")

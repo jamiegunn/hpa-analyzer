@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: umbrella-worker
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: {matchLabels: {app: worker}}
+  template:
+    metadata: {labels: {app: worker}}
+    spec:
+      containers:
+        - name: app
+          image: corp/worker:1.0
+          resources:
+            requests: {cpu: 100m, memory: 2Gi}
+            limits: {cpu: 200m, memory: 2Gi}
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Xmx4g"

@@ -162,12 +162,65 @@ class ManifestDoc:
     rendered: bool = True
 
 
+class MeasuredValues(Dict[str, int]):
+    """`{component: bytes-or-count}` that also remembers what the user typed.
+
+    The budget table cites each measured row as `MEASURED: --measured
+    metaspace=...`, which is a claim about provenance: it says "this number is
+    here because you passed that". Rendering the value from the parsed integer
+    broke that claim in a quiet way - `--measured metaspace=210Mi` was cited
+    back as `--measured metaspace=220200960`, a string the user never typed
+    and would have to do arithmetic to recognise as their own.
+
+    Re-rendering the integer through the tool's own formatter would not fix
+    it, only move it: `256M` would come back as `244.1Mi`, which is a
+    different string the user did not type, and one that looks like the tool
+    disagreed with them. The only thing that is actually provenance is the
+    literal, so the literal is what gets carried.
+
+    It is a `dict` subclass rather than a second return value so that
+    `parse_measured(...) == {"metaspace": 220200960}` still holds and so that
+    a plain dict - which is what the library API and the tests pass - remains
+    valid input. `literals` is then simply empty, and the citation falls back
+    to the integer, which for a caller that never typed anything is the whole
+    truth about where the number came from.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.literals: Dict[str, str] = {}
+
+    def cite(self, key: str) -> str:
+        """The `key=value` to print back, preferring what was typed."""
+        return f"{key}={self.literals.get(key, self.get(key))}"
+
+    def copy(self) -> "MeasuredValues":
+        """`dict.copy` returns a plain dict and would drop the literals.
+
+        Discovery takes a defensive copy of whatever the caller passed, so
+        without this override the provenance survived parsing and was lost one
+        function later - which is how the first attempt at this fix appeared
+        to do nothing at all.
+        """
+        out = MeasuredValues(self)
+        out.literals = dict(self.literals)
+        return out
+
+    @staticmethod
+    def of(measured) -> "MeasuredValues":
+        """Accept either a parsed `MeasuredValues` or a plain dict."""
+        if isinstance(measured, MeasuredValues):
+            return measured.copy()
+        return MeasuredValues(measured or {})
+
+
 @dataclass
 class ChartContext:
     """Everything discovered in the target directory."""
     root: str = ""
     chart_yaml_path: Optional[str] = None
     chart: Dict[str, Any] = field(default_factory=dict)
+    chart_yaml_raw: str = ""                                        # raw text, for line_of()
     values_files: Dict[str, Any] = field(default_factory=dict)      # path -> parsed dict
     values_raw: Dict[str, str] = field(default_factory=dict)        # path -> raw text
     values: Dict[str, Any] = field(default_factory=dict)            # merged effective values
@@ -185,9 +238,43 @@ class ChartContext:
     # --- coverage / confidence -------------------------------------------
     render_mode: str = "static"          # "helm" | "static" | "static (helm failed: ...)"
     helm_error: Optional[str] = None
+    # --- render context (R4) ----------------------------------------------
+    # `helm template` is a function of (chart, values, kubeVersion,
+    # apiVersions). These record the last two so the report can state which
+    # cluster the "rendered truth" is true ABOUT, instead of implying it is
+    # true everywhere. See renderplan.py.
+    helm_present: bool = False           # helm was on PATH, whatever happened next
+    render_kube_version: Optional[str] = None   # value passed to --kube-version
+    render_version_source: str = ""      # user | chart-ceiling | known-latest | ...
+    render_version_reason: str = ""      # one line, report-ready
+    render_probe_version: Optional[str] = None  # second render, for divergence
+    render_divergence: Optional[Dict[str, Any]] = None  # CH015 evidence
+    kube_version_override: Optional[str] = None   # from --kube-version
     coverage: List[List[str]] = field(default_factory=list)   # [item, status]
     subcharts_present: bool = False
+    # Objects `helm template` rendered from charts/ - kept, never graded.
+    #
+    # Discarding them (which is what happened until R7) does not make the
+    # scope boundary honest, it makes it invisible to the checks: HP041 asked
+    # "does any workload match this HPA's scaleTargetRef?", could not see the
+    # subchart Deployment helm had just rendered, and reported the user's
+    # correct HPA as dangling at HIGH severity, labelled OBSERVED. A scope
+    # boundary you cannot see from the inside gets mistaken for evidence.
+    #
+    # These are deliberately NOT in `docs`: nothing here is graded, no finding
+    # is raised about them, and the parent's score stays a statement about the
+    # parent. They exist so a check can answer "is this absent, or is it
+    # merely somewhere I do not look?" - which are different answers.
+    subchart_docs: List[ManifestDoc] = field(default_factory=list)
+    subchart_names: List[str] = field(default_factory=list)
     assumed_java: Optional[str] = None   # from --assume-java
+    # from --measured: component key -> a number the USER measured. Anything
+    # in here stops being an estimate (R9): it is OBSERVED, has zero width,
+    # and cannot contribute to an UNDETERMINED memory verdict. Typed as
+    # MeasuredValues so the literal the user typed survives as far as the
+    # budget table's provenance cell (C2.8(g)); a plain dict is still valid
+    # input and simply has nothing to quote.
+    measured: "MeasuredValues" = field(default_factory=MeasuredValues)
     overlay_values: List[str] = field(default_factory=list)   # non-base values files
     chart_dir_abs: Optional[str] = None  # for helm re-render of overlay variants
     foreign_charts: List[str] = field(default_factory=list)   # other Chart.yamls NOT analyzed

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: ledger
+description: >-
+  A chart that is correct at every per-container check and wrong at pod scope.
+  The application container is Guaranteed, probed, non-root and read-only; the
+  defects exist only in the aggregate the scheduler actually uses.
+type: application
+version: 2.1.0
+appVersion: "5.0.0"
+kubeVersion: ">=1.33.0-0"

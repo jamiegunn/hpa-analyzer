@@ -1,0 +1,29 @@
+{{- /*
+  Gated on .Capabilities.KubeVersion, which is exactly what --kube-version
+  sets. NOT on .Capabilities.APIVersions.Has - that set is the union of every
+  group/version compiled into the helm binary, and answers "true" for
+  autoscaling/v2 even when helm is told the cluster is 1.16. A chart gated on
+  it renders the same branch at every version and would prove nothing here.
+  See hpaanalyzer/renderplan.py for the probe that established that, and
+  fixtures/apiversion-chart for the fixture that exercises it.
+*/ -}}
+{{- if semverCompare ">=1.23-0" .Capabilities.KubeVersion.Version }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Chart.Name }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

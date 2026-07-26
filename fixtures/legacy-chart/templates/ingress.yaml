@@ -1,0 +1,17 @@
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: legacy-ingress
+  labels:
+    app.kubernetes.io/name: legacy-ingress
+    app.kubernetes.io/instance: legacy-ingress
+    app.kubernetes.io/managed-by: Helm
+spec:
+  rules:
+    - host: legacy.example.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: legacy-ingress
+              servicePort: 80

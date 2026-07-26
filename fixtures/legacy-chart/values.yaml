@@ -1,0 +1,24 @@
+replicaCount: 2
+
+image:
+  repository: registry.example.com/legacy-ingress
+  tag: "1.9.4"
+  pullPolicy: IfNotPresent
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: true
+  host: legacy.example.com

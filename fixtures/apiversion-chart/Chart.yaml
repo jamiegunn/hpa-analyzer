@@ -1,0 +1,18 @@
+apiVersion: v2
+name: apiversion-gated
+description: >-
+  A chart that branches on `.Capabilities.APIVersions.Has` - the single most
+  common capability idiom in real charts, and the one `helm template` cannot
+  answer honestly. Under `helm template` the APIVersions set is the union of
+  every group/version compiled into the helm binary, so "autoscaling/v2" and
+  "autoscaling/v2beta1" are BOTH true at every --kube-version. This chart
+  therefore renders its v2 arm no matter what cluster it is told about,
+  including clusters where v2 does not exist. Exists to exercise CH016, which
+  withholds confidence in the rendered branch rather than asserting it.
+type: application
+version: 1.0.0
+appVersion: "2.0.0"
+kubeVersion: ">=1.21.0-0 <1.33.0-0"
+maintainers:
+  - name: platform
+    email: platform@example.com

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: payments
+description: JVM service with a mesh sidecar and a native log-shipper sidecar
+type: application
+version: 1.4.0
+appVersion: "3.2.1"
+kubeVersion: ">=1.29.0-0"

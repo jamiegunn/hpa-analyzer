@@ -1,0 +1,11 @@
+apiVersion: v2
+name: nojvm
+description: >-
+  A chart with no JVM anywhere. It exists to pin the OTHER half of the R8
+  gate defect: the pre-fix tool decided "is this a Java workload?" by asking
+  whether a file named Dockerfile existed, so this nginx chart - nginx image,
+  nginx Dockerfile, not one Java string in it - was told to set
+  -XX:MaxRAMPercentage, at HIGH, and was scored in a category called
+  "Java / JVM Container Fitness".
+version: 0.1.0
+appVersion: "1.27"

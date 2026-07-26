@@ -22,28 +22,41 @@ from typing import List, Optional
 
 from .dockerparse import (effective_flags, extract_jvm_flags, flag_val,
                           has_flag, inert_opt_vars)
-from .kube import chart_jvm_env_flags
-from .models import (AnalysisResult, Category, ChartContext, DockerfileInfo,
-                     Finding, Severity)
+from .kube import (JVM_EVIDENCE_INPUTS, chart_jvm_env_flags, containers,
+                   container_jvm_evidence, is_sidecar, jvm_evidence)
+from .models import (AnalysisResult, Basis, Category, ChartContext,
+                     DockerfileInfo, Finding, Severity)
 from .quantity import fmt_bytes, parse_jvm_size
 
 
 def run(ctx: ChartContext, result: AnalysisResult) -> None:
-    if not ctx.dockerfiles:
-        result.add(Finding(
-            rule_id="DF000", severity=Severity.INFO, category=Category.DOCKERFILE,
-            title="No Dockerfile found", file="",
-            detail="No Dockerfile present in the analyzed directory; Java/JVM "
-                   "checks that need it were skipped.",
-            why="The chart's resource settings can only be judged against the "
-                "JVM configuration that will run inside the container.",
-            fix="Include the service Dockerfile in the analyzed directory."))
-        return
+    # R8: two questions that the pre-R8 code answered with one test.
+    #
+    #   "Is there a Dockerfile?" decides whether IMAGE-level checks can run -
+    #   base image pinning, entrypoint/signal handling, root user, layer
+    #   hygiene. Those are properties of a file, so a missing file really is
+    #   the end of them.
+    #
+    #   "Is this a JVM workload?" decides whether JAVA checks apply. That is a
+    #   property of the workload, and `ls Dockerfile` is not a way to find it
+    #   out. Asking it that way missed a -Xmx4g under a 2Gi limit because the
+    #   chart shipped without a Dockerfile, and told an nginx chart to set
+    #   -XX:MaxRAMPercentage because it shipped with one.
+    #
     # F4: JVM options set via pod-spec env (JAVA_TOOL_OPTIONS etc.) are read by
     # the JVM no matter how the image was built. Fold them into the flags the
     # JVM actually receives so the analyzer neither invents "missing" findings
     # nor falsely absolves an over-large env-set heap.
     env_flags = chart_jvm_env_flags(ctx)
+    evidence = jvm_evidence(ctx)
+
+    if not ctx.dockerfiles:
+        _no_dockerfile(ctx, result, env_flags, evidence)
+        return
+
+    if not evidence:
+        _no_jvm_evidence(ctx, result)
+
     for df in ctx.dockerfiles:
         eff = effective_flags(df)
         applied = eff + env_flags
@@ -53,11 +66,113 @@ def run(ctx: ChartContext, result: AnalysisResult) -> None:
             return "" if flag in eff_set else \
                 " [currently INERT - defined but never applied; see DF013]"
 
-        _base_image(ctx, result, df)
-        _java_container_awareness(ctx, result, df, applied, annotate)
-        _jvm_flags(ctx, result, df, applied, annotate, env_flags)
+        _base_image(ctx, result, df, jvm=bool(evidence))
+        if evidence:
+            _java_container_awareness(ctx, result, df, applied, annotate)
+            _jvm_flags(ctx, result, df, applied, annotate, env_flags)
         _entrypoint(ctx, result, df)
         _hygiene(ctx, result, df)
+
+
+def _no_dockerfile(ctx: ChartContext, result: AnalysisResult,
+                   env_flags: List[str], evidence: List[str]) -> None:
+    """No Dockerfile: image-level checks are genuinely impossible. The Java
+    ones are not, if the chart itself says a JVM is involved.
+
+    DF000 stays - it is a coverage statement, and dropping it while widening
+    what runs would trade one silence for another. What changes is that it now
+    says which checks were skipped and which were NOT, because "Java/JVM checks
+    that need it were skipped" was read (correctly, pre-R8) as "no Java/JVM
+    checks ran", and a reader had no way to tell that the heap arithmetic was
+    among the casualties.
+    """
+    if evidence:
+        applied = ", ".join(env_flags) if env_flags else "none"
+        result.add(Finding(
+            rule_id="DF000", severity=Severity.INFO, category=Category.DOCKERFILE,
+            title="No Dockerfile found - image-level checks skipped, JVM "
+                  "checks ran from the pod spec",
+            file="", basis=Basis.OBSERVED,
+            detail=f"No Dockerfile in the analyzed directory. NOT CHECKED: "
+                   f"base image pinning, JDK version and container awareness, "
+                   f"entrypoint/PID-1 signal handling, image user and layer "
+                   f"hygiene. STILL CHECKED, from the chart alone: heap vs "
+                   f"limits.memory, CPU visibility, and applied JVM flags "
+                   f"({applied}). Evidence this is a JVM workload: "
+                   f"{'; '.join(evidence[:3])}.",
+            why="The JVM reads JAVA_TOOL_OPTIONS, JDK_JAVA_OPTIONS and "
+                "_JAVA_OPTIONS from its environment by itself, so a heap set "
+                "there is as real as one baked into the image. Before R8 this "
+                "check returned here, and a chart asking for a 4 GiB heap "
+                "inside a 2 GiB limit was graded A- in silence.",
+            fix="Include the service Dockerfile in the analyzed directory to "
+                "restore the image-level checks listed above; the JVM sizing "
+                "findings in this report do not depend on it.",
+            assumes="that no -Xmx on the image's own java command line "
+                    "overrides these env-supplied flags - a command-line -Xmx "
+                    "wins over JAVA_TOOL_OPTIONS, and without the Dockerfile "
+                    "that cannot be ruled out"))
+        # Run the flag-reality checks the DF000 title just promised. Claiming
+        # "JVM checks ran from the pod spec" and then not running them would
+        # be a worse lie than the silence it replaces.
+        if env_flags:
+            _jvm_flags(ctx, result, None, list(env_flags), lambda f: "",
+                       env_flags, file=_jvm_env_file(ctx))
+        return
+    result.add(Finding(
+        rule_id="DF000", severity=Severity.INFO, category=Category.DOCKERFILE,
+        title="No Dockerfile found", file="", basis=Basis.OBSERVED,
+        detail="No Dockerfile present in the analyzed directory; image-level "
+               "checks (base image, entrypoint, user, hygiene) were skipped.",
+        why="Those checks read a Dockerfile and there is none. Java/JVM checks "
+            "did not run either, but for a separate reason recorded in the "
+            "coverage table: nothing in this chart indicates a JVM workload.",
+        fix="Include the service Dockerfile in the analyzed directory."))
+    _no_jvm_evidence(ctx, result)
+
+
+def _jvm_env_file(ctx: ChartContext) -> str:
+    """The template that made this chart look like a JVM workload.
+
+    Findings raised with df=None have no Dockerfile to point at, and pointing
+    at "" would put them in the report with a blank location - which is how a
+    reader ends up unable to act on a CRITICAL. The honest anchor is the
+    manifest whose container carries the evidence, since that is the file the
+    reader has to edit to change the outcome.
+    """
+    for doc in ctx.workloads:
+        for c in containers(doc):
+            if is_sidecar(c.get("name", ""), c.get("image", "")):
+                continue
+            if container_jvm_evidence(c):
+                return doc.file or ""
+    return ""
+
+
+def _no_jvm_evidence(ctx: ChartContext, result: AnalysisResult) -> None:
+    """Record, in the coverage table, that the Java category did not apply.
+
+    C2.6: an area that was not graded has to say it was not graded. A report
+    that only prints failures makes "we checked and it was fine" and "we never
+    looked" the same page. Pre-R8 this chart got the opposite treatment - a
+    scored 'Java / JVM Container Fitness' category and a HIGH finding - so
+    replacing that with nothing at all would be trading a false positive for a
+    false negative and calling it progress.
+    """
+    for row in ctx.coverage:
+        if row and row[0] == "Java / JVM checks":
+            return
+    ctx.coverage.append([
+        "Java / JVM checks",
+        "NOT RUN - no JVM evidence in this chart. Inputs examined: "
+        + JVM_EVIDENCE_INPUTS +
+        ". None of them mentions a JVM, so heap-vs-limit arithmetic, JDK "
+        "container-awareness and flag checks were skipped and this chart is "
+        "NOT scored on them. The absence of Java findings here is scope, not "
+        "a pass. If this IS a Java workload, the tool is looking in the wrong "
+        "place: set JAVA_TOOL_OPTIONS in the pod spec (which is where the "
+        "flags belong anyway) or analyze the directory holding the "
+        "Dockerfile."])
 
 
 def _add(result, **kw):
@@ -68,7 +183,17 @@ def _add(result, **kw):
 # Base image
 # ---------------------------------------------------------------------------
 
-def _base_image(ctx, result, df: DockerfileInfo):
+def _base_image(ctx, result, df: DockerfileInfo, jvm: bool = True):
+    """`jvm` is whether anything in this chart indicates a JVM workload.
+
+    DF001/DF002/DF004 are about the image and run either way. DF003 is not: it
+    says "Java version undeterminable - JVM version checks degraded" and tells
+    the reader to re-run with --assume-java, which presupposes there is a Java
+    version to determine. Emitted on an nginx chart - which is what happened
+    before R8, because `java_major is None` is true of every non-Java image -
+    it is a MEDIUM finding reporting the absence of a thing that was never
+    there, plus an instruction the reader cannot carry out.
+    """
     fb = df.final_base
     if not fb:
         _add(result, rule_id="DF001", severity=Severity.HIGH, category=Category.DOCKERFILE,
@@ -90,6 +215,8 @@ def _base_image(ctx, result, df: DockerfileInfo):
              fix="Pin a full tag (better: a digest), e.g. "
                  "eclipse-temurin:17.0.11_9-jre.")
 
+    if df.java_major is None and not jvm:
+        return
     if df.java_major is None:
         _add(result, rule_id="DF003", severity=Severity.MEDIUM, category=Category.JAVA,
              title="Java version undeterminable - JVM version checks degraded",
@@ -280,31 +407,52 @@ def _java_container_awareness(ctx, result, df: DockerfileInfo,
 # Heap / flags - reality = applied flags; limit math lives in proofs.py
 # ---------------------------------------------------------------------------
 
-def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
-               env_flags: List[str] = ()):
+def _jvm_flags(ctx, result, df: Optional[DockerfileInfo], eff: List[str],
+               annotate, env_flags: List[str] = (), file: str = ""):
+    """Flag-reality checks. `df` is optional since R8.
+
+    Every rule here judges the flags the JVM will ACTUALLY receive, and since
+    F4 that set includes flags the pod spec supplies through JAVA_TOOL_OPTIONS
+    - which the JVM reads with no help from the image. So none of these rules
+    needs a Dockerfile to be answerable; the pre-R8 code required one only
+    because the function happened to live in the module that parses Dockerfiles.
+    With df=None the image-level half (the inert-vs-applied distinction, the
+    JDK version) is simply unknown, and each rule below says so rather than
+    filling it in.
+    """
     # eff already includes env-applied flags; raw is image-level ("defined
     # somewhere, maybe inert") for the inert-vs-applied distinction.
-    raw = df.jvm_flags
+    raw = df.jvm_flags if df is not None else []
+    path = df.path if df is not None else file
     xmx = parse_jvm_size(flag_val(eff, "Xmx") or "")
     xms = parse_jvm_size(flag_val(eff, "Xms") or "")
     maxram_pct = flag_val(eff, "MaxRAMPercentage")
     maxram_frac = flag_val(eff, "MaxRAMFraction")
-    major = df.java_major or 0
+    major = (df.java_major or 0) if df is not None else 0
 
     if xmx is None and maxram_pct is None and maxram_frac is None:
         # distinguish "never configured" from "configured but inert"
         raw_has_sizing = (flag_val(raw, "Xmx") or flag_val(raw, "MaxRAMPercentage")
                           or flag_val(raw, "MaxRAMFraction"))
-        modern = (major >= 10) or (major == 8 and (df.java_update or 0) >= 191) \
+        modern = (major >= 10) or (major == 8 and ((df.java_update if df else 0) or 0) >= 191) \
                  or (major in (11, 17, 21))
-        sev = Severity.MEDIUM if modern else Severity.HIGH
+        # With no Dockerfile the JDK version is unknown, so the HIGH variant -
+        # which is justified by "an old JVM sizes the heap from NODE RAM" -
+        # cannot be asserted. Report the finding at the severity the evidence
+        # supports and name the gap, rather than picking the scarier branch
+        # because a default happened to be 0.
+        sev = (Severity.MEDIUM if (modern or df is None) else Severity.HIGH)
         detail = "Neither -Xmx nor -XX:MaxRAMPercentage/-XX:MaxRAMFraction is applied."
         if raw_has_sizing:
             detail += (" Heap sizing flags DO exist in an env var, but nothing "
                        "applies them (see DF013) - the JVM runs on pure "
                        "defaults.")
+        if df is None:
+            detail += (" No Dockerfile was in scope, so the JDK version is "
+                       "unknown and image-baked sizing could not be ruled out; "
+                       "severity is held at MEDIUM for that reason.")
         _add(result, rule_id="JV021", severity=sev, category=Category.JAVA,
-             title="No JVM heap sizing is actually applied", file=df.path,
+             title="No JVM heap sizing is actually applied", file=path,
              detail=detail,
              why="Without an applied heap bound the JVM uses its ergonomic "
                  "default: 25% of the memory it can see. Two consequences: (a) "
@@ -328,7 +476,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
         if pct is not None and pct >= 85:
             _add(result, rule_id="JV022", severity=Severity.HIGH, category=Category.JAVA,
                  title=f"MaxRAMPercentage={maxram_pct} leaves too little non-heap room",
-                 file=df.path,
+                 file=path,
                  detail=f"-XX:MaxRAMPercentage={maxram_pct} (applied).",
                  why="Container memory = heap + Metaspace + code cache + thread "
                      "stacks + direct buffers + GC bookkeeping + native. At "
@@ -344,7 +492,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
                       f"balance => OOMKill.")
     if maxram_frac is not None:
         _add(result, rule_id="JV023", severity=Severity.LOW, category=Category.JAVA,
-             title="Deprecated MaxRAMFraction", file=df.path,
+             title="Deprecated MaxRAMFraction", file=path,
              detail=f"-XX:MaxRAMFraction={maxram_frac} (deprecated since JDK 10).",
              why="Integer fractions are too coarse (1=100%, 2=50%, 3=33%, 4=25%) "
                  "- there is no way to say 60%. =1 is an OOM-kill guarantee.",
@@ -354,7 +502,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
     raw_xms = parse_jvm_size(flag_val(raw, "Xms") or "")
     if raw_xmx is not None and raw_xms is not None and raw_xms != raw_xmx:
         _add(result, rule_id="JV024", severity=Severity.LOW, category=Category.JAVA,
-             title="Xms != Xmx in a container", file=df.path,
+             title="Xms != Xmx in a container", file=path,
              detail=f"-Xms {fmt_bytes(raw_xms)} vs -Xmx {fmt_bytes(raw_xmx)}."
                     + annotate(f"-Xmx{flag_val(raw, 'Xmx')}"),
              why="The pod's memory REQUEST must cover Xmx anyway (the heap will "
@@ -365,7 +513,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
 
     if xmx is not None and has_flag(eff, "MaxRAMPercentage"):
         _add(result, rule_id="JV025", severity=Severity.LOW, category=Category.JAVA,
-             title="Both -Xmx and MaxRAMPercentage applied", file=df.path,
+             title="Both -Xmx and MaxRAMPercentage applied", file=path,
              detail="Explicit -Xmx overrides MaxRAMPercentage.",
              why="Redundant and confusing: -Xmx wins; the percentage silently "
                  "does nothing, so resizing the container limit no longer "
@@ -379,7 +527,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
             extra = (" The flag exists in an inert variable (see DF013) - "
                      "defined, never applied.")
         _add(result, rule_id="JV026", severity=Severity.MEDIUM, category=Category.JAVA,
-             title="No applied -XX:+ExitOnOutOfMemoryError", file=df.path,
+             title="No applied -XX:+ExitOnOutOfMemoryError", file=path,
              detail="The flag is absent from the options the JVM will actually "
                     "receive." + extra,
              why="After a heap OutOfMemoryError a JVM often limps on with dead "
@@ -395,7 +543,7 @@ def _jvm_flags(ctx, result, df: DockerfileInfo, eff: List[str], annotate,
     if not has_gc and major and major <= 11:
         _add(result, rule_id="JV027", severity=Severity.LOW, category=Category.JAVA,
              title="GC not pinned - ergonomics may pick SerialGC in-container",
-             file=df.path,
+             file=path,
              detail=f"Java {major} with no applied collector flag.",
              why="JVM ergonomics picks the collector from visible CPUs/RAM: with "
                  "<2 CPUs or <~1792 MiB visible, you get SerialGC - single-"

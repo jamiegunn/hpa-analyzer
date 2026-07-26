@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger
+  labels:
+    app.kubernetes.io/name: ledger
+    app.kubernetes.io/instance: ledger
+    app.kubernetes.io/version: "5.0.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ledger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ledger
+    spec:
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        # A native sidecar (restartPolicy: Always, GA 1.33). It runs for the
+        # pod's entire life and is summed into the pod's request like a
+        # regular container - with nothing declared, it is summed as zero.
+        - name: metrics-agent
+          image: otel/opentelemetry-collector:0.98.0
+          restartPolicy: Always
+        # A one-shot init container. It has exited before the application
+        # container starts, but the node must have held its request free, and
+        # keeps holding it for as long as the pod lives.
+        - name: db-migrate
+          image: registry.example.com/ledger-migrate:5.0.0
+          resources:
+            requests:
+              cpu: "2"
+              memory: 6Gi
+            limits:
+              cpu: "2"
+              memory: 6Gi
+      containers:
+        - name: ledger
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=70.0 -XX:+UseG1GC"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          startupProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

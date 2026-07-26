@@ -1,0 +1,18 @@
+apiVersion: v2
+name: capability-gated
+description: >-
+  A chart that BRANCHES on the cluster version, which is the ordinary,
+  recommended way to support a range of Kubernetes releases - and the reason
+  `helm template` cannot be treated as a function of the chart directory
+  alone. Rendered at 1.21 this chart emits a PodDisruptionBudget and no HPA;
+  rendered at 1.32 it emits an HPA and no PDB (policy/v1 PDB is gated the
+  other way round on purpose, so the divergence is visible in BOTH
+  directions and not just as "the newer render has more objects").
+  Exists to exercise CH015 and the dual-render probe.
+type: application
+version: 1.0.0
+appVersion: "3.2.1"
+kubeVersion: ">=1.21.0-0 <1.33.0-0"
+maintainers:
+  - name: platform
+    email: platform@example.com

@@ -1,0 +1,47 @@
+{{- /*
+  The canonical "support both old and new clusters" idiom. On a real cluster
+  the .Capabilities.APIVersions set comes from a live discovery call and this
+  is correct. Under `helm template` it comes from
+  scheme.Scheme.PrioritizedVersionsAllGroups() - every group/version vendored
+  into the helm binary - so the first arm is taken unconditionally, at every
+  --kube-version, including 1.16 where autoscaling/v2 did not exist. And
+  --api-versions only APPENDS, so no invocation can correct it.
+  CH016 exists to say so rather than to report the v2 arm as fact.
+*/ -}}
+{{- if .Capabilities.APIVersions.Has "autoscaling/v2" }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Chart.Name }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- else }}
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Chart.Name }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        targetAverageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

@@ -1,0 +1,24 @@
+# autoscaling/v2 does not exist before Kubernetes 1.23, and this chart's
+# kubeVersion says it supports 1.20-1.21. helm's gate passes (the chart is
+# telling the truth about where it wants to run), the install proceeds, and the
+# API server then rejects this object with "no matches for kind".
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: legacy-ingress
+  labels:
+    app.kubernetes.io/name: legacy-ingress
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: legacy-ingress
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}

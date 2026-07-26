@@ -22,8 +22,11 @@ from .models import AnalysisResult, ChartContext, Finding
 
 
 def analyze(target: str, helm_mode: str = "auto",
-            assume_java: Optional[str] = None) -> AnalysisResult:
-    ctx = discover(target, helm_mode=helm_mode, assume_java=assume_java)
+            assume_java: Optional[str] = None,
+            kube_version: Optional[str] = None,
+            measured: Optional[dict] = None) -> AnalysisResult:
+    ctx = discover(target, helm_mode=helm_mode, assume_java=assume_java,
+                   kube_version=kube_version, measured=measured)
     result = AnalysisResult(context=ctx)
     for module in (checks_chart, checks_workload, checks_hpa, checks_docker,
                    proofs):
@@ -44,8 +47,13 @@ def _variant_ctx(ctx: ChartContext, overlay: str) -> Optional[ChartContext]:
 
     if ctx.render_mode == "helm" and ctx.chart_dir_abs:
         overlay_abs = os.path.join(ctx.root, overlay)
+        # Same cluster version as the primary render - an overlay variant
+        # that silently rendered for a different Kubernetes than the base
+        # would make the two incomparable, which is the whole point of the
+        # comparison.
         output, err = render_chart(ctx.chart_dir_abs,
-                                   extra_values=[overlay_abs])
+                                   extra_values=[overlay_abs],
+                                   kube_version=ctx.render_kube_version)
         if output is not None:
             vctx.docs = helm_parse_output(vctx, output)
             return vctx

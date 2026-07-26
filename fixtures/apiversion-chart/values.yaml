@@ -1,0 +1,15 @@
+replicaCount: 3
+image:
+  repository: example.com/api
+  tag: "2.0.0"
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 70

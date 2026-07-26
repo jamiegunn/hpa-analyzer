@@ -4,7 +4,8 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .helmyaml import enclosing_conditions, line_of, values_lookup
-from .kube import as_int, containers, container_jvm_env_flags, doc_name
+from .kube import (as_int, containers, container_jvm_env_flags, doc_name,
+                   is_jvm_image)
 from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
                      ManifestDoc, Severity)
 from .quantity import parse_cpu, parse_memory, fmt_millicores
@@ -301,9 +302,6 @@ def _cpu_target_quality(ctx, result, hpa, name, target_pct: int):
                   f"{100/target_pct:.2f}x.")
 
 
-_JAVA_IMAGE_HINTS = ("temurin", "corretto", "openjdk", "/java", "java:",
-                     "-jre", "-jdk", "jre-", "jdk-", "graalvm", "liberica",
-                     "zulu", "sapmachine", "semeru", "adoptopenjdk", "distroless/java")
 _NONJVM_IMAGE_HINTS = ("nginx", "redis", "postgres", "mysql", "mariadb",
                        "memcached", "haproxy", "envoy", "traefik", "busybox",
                        "alpine", "httpd", "rabbitmq", "mongo", "node:", "python:",
@@ -317,11 +315,28 @@ def _target_is_jvm(ctx, target):
     EVERY memory-metric HPA a 'JVM ratchet' CRITICAL, even one targeting nginx.
     Prefer positive evidence on the target itself; only guess (ASSUMED) when
     the pairing is unambiguous.
+
+    R8, eighth site, two separate defects:
+
+    1. This module carried its own _JAVA_IMAGE_HINTS list - a second, drifted
+       copy of the same knowledge kube._JVM_IMAGE_RE holds. It had no tomcat,
+       jetty, wildfly or jboss, so a Tomcat HPA scaling on memory was a MEDIUM
+       here while the JAVA category graded the same image as a JVM. Two
+       answers to one question in one report is the defect R8 is about,
+       whatever each answer is. It now calls the shared function; the
+       NON-JVM list stays local because it answers a different question
+       (positive evidence that this is something else) that kube.py does not.
+
+    2. The tail returned `False, OBSERVED` - "we looked and it is not a JVM" -
+       when nothing had been determined at all. That is C2.2: a limit of the
+       method reported as a finding about the target. It picks the lenient
+       MEDIUM branch AND stamps it with the tool's highest-confidence label.
+       Undetermined is now its own answer, and the caller reports it as such.
     """
     if target is not None:
         for c in containers(target):
             img = str(c.get("image", "")).lower()
-            if container_jvm_env_flags(c) or any(h in img for h in _JAVA_IMAGE_HINTS):
+            if container_jvm_env_flags(c) or is_jvm_image(img):
                 return True, Basis.OBSERVED
             if any(h in img for h in _NONJVM_IMAGE_HINTS):
                 return False, Basis.OBSERVED
@@ -332,22 +347,36 @@ def _target_is_jvm(ctx, target):
     if jvm_dfs and len(scalable) <= 1:
         # single workload + a Java image: the obvious pairing, but a guess
         return True, Basis.ASSUMED
-    return False, Basis.OBSERVED
+    return None, Basis.DERIVED
 
 
 def _memory_metric(ctx, result, hpa, name, tgt, req_mem, target=None):
     is_jvm, jvm_basis = _target_is_jvm(ctx, target)
     avg_util = tgt.get("averageUtilization")
+    # is_jvm is now three-valued: True, False, and None for "could not be
+    # determined". None must not collapse into False - that would restore the
+    # exact reading R8 removed, in which the tool's silence about the workload
+    # is printed as a fact about the workload.
     sev = Severity.CRITICAL if is_jvm else Severity.MEDIUM
-    why = ("Memory-utilization HPA assumes memory falls when load falls. A JVM "
-           "violates that assumption: committed heap stays at or near its "
-           "high-water mark (most collectors return memory to the OS "
-           "reluctantly or never), so measured 'utilization' stays high after "
-           "load drops. Result: the HPA scales UP under load but never scales "
-           "back DOWN - it ratchets to maxReplicas and stays there.")
-    if not is_jvm:
+    if is_jvm:
+        why = ("Memory-utilization HPA assumes memory falls when load falls. A "
+               "JVM violates that assumption: committed heap stays at or near "
+               "its high-water mark (most collectors return memory to the OS "
+               "reluctantly or never), so measured 'utilization' stays high "
+               "after load drops. Result: the HPA scales UP under load but "
+               "never scales back DOWN - it ratchets to maxReplicas and stays "
+               "there.")
+    elif is_jvm is False:
         why = ("Memory-based scaling only works for workloads whose RSS tracks "
                "load closely and is released promptly - rare in practice.")
+    else:
+        why = ("Memory-based scaling only works for workloads whose RSS tracks "
+               "load closely and is released promptly - rare in practice. This "
+               "tool could not determine what this HPA targets, so it does not "
+               "know whether that holds here; if the target is a JVM (or any "
+               "runtime with a caching allocator) the failure is worse than "
+               "MEDIUM - committed heap never falls, so the scale-down "
+               "condition is unreachable and the HPA ratchets to maxReplicas.")
     math = None
     if isinstance(avg_util, int):
         math = (f"Example with Xmx-bound JVM: after warmup RSS ~= "
@@ -361,9 +390,21 @@ def _memory_metric(ctx, result, hpa, name, tgt, req_mem, target=None):
         assumes = ("the workload this HPA targets is the Java service (inferred "
                    "from a single workload + a Java Dockerfile; the HPA's target "
                    "was not resolvable by name)")
+    elif is_jvm is None:
+        # C2.2 / C2.3: name the gap where the reader meets the number, not
+        # only in a coverage table three sections away. The severity below the
+        # sentence is the lenient one, and the reader is entitled to know it
+        # was picked in the absence of evidence rather than because of it.
+        assumes = ("that the target is NOT a JVM-style workload - the HPA's "
+                   "scaleTargetRef could not be resolved to a workload in this "
+                   "chart, so nothing about the target was read; severity is "
+                   "the non-JVM one for that reason, and would be CRITICAL if "
+                   "the target turns out to be a JVM")
+    basis = (jvm_basis if is_jvm else
+             (Basis.OBSERVED if is_jvm is False else Basis.DERIVED))
     _add(result, rule_id="HP025", severity=sev, category=Category.HPA,
          title="HPA scales on memory" + (" for a JVM workload" if is_jvm else ""),
-         file="", basis=jvm_basis if is_jvm else Basis.OBSERVED, assumes=assumes,
+         file="", basis=basis, assumes=assumes,
          detail=f"HPA '{name}' includes a memory utilization/average-value metric"
                 + (f" (target {avg_util}%)" if isinstance(avg_util, int) else "") + ".",
          why=why,
@@ -401,6 +442,72 @@ def _behavior(ctx, result, hpa, name, spec):
              fix="Use >= 300s (the default) for JVM workloads.")
 
 
+def _target_is_out_of_scope(ctx, ref, hpa_name) -> bool:
+    """True when 'no workload matches this ref' is a fact about where this
+    tool looks, not a fact about the chart. Records why, and suppresses HP041.
+
+    Two distinct situations, and neither is a defect in the user's chart:
+
+      1. The target IS provided, by a subchart. `helm template` rendered it in
+         the same run; the analyzer parks those objects in ctx.subchart_docs
+         instead of grading them. The reference resolves. Saying it dangles is
+         false - it was the pre-R7 behaviour and it cost the chart 12 points
+         and shipped a fix instruction for a bug that was not there.
+
+      2. Subcharts exist but none of their objects were visible - static mode
+         renders nothing, and a subchart gated off by a condition emits
+         nothing. Then the tool cannot tell 'this target is missing' from
+         'this target is somewhere I did not read', and C2.2 is explicit about
+         which of those it is allowed to print.
+
+    Case 2 is the conservative half of the trade and it is worth naming: a
+    genuinely dangling ref in an umbrella chart analysed statically now goes
+    unreported. That is the correct direction to err - a false HIGH sends
+    someone to edit correct code, while this leaves an itemised coverage row
+    saying exactly which claim was not checked and why - but it IS a loss, so
+    it is stated here and in the report rather than left for someone to find.
+
+    A chart with no charts/ directory reaches neither branch: HP041 keeps
+    firing exactly as it did, which is what CLAIM 4 of proof/p7_subcharts.py
+    pins with a deliberately typo'd ref.
+    """
+    if not ctx.subcharts_present:
+        return False
+    rk = str(ref.get("kind", "")).lower()
+    rn = str(ref.get("name", ""))
+    key = f"{ref.get('kind')}/{ref.get('name')}"
+    names = ", ".join(ctx.subchart_names) or "(unnamed)"
+
+    for d in getattr(ctx, "subchart_docs", []):
+        if (d.kind or "").lower() != rk:
+            continue
+        dn = ""
+        if isinstance(d.data, dict):
+            dn = str((d.data.get("metadata") or {}).get("name") or "")
+        if dn == rn:
+            ctx.coverage.append(
+                [f"HPA '{hpa_name}' -> {key}",
+                 f"RESOLVES to an object rendered from {d.file}, i.e. from "
+                 f"subchart '{d.file.split('/')[1]}'. The reference is not "
+                 f"dangling. That workload is out of scope, so its resources, "
+                 f"probes and JVM settings are NOT graded and the scaling "
+                 f"arithmetic in this report is about the HPA alone, not about "
+                 f"the pod it scales."])
+            return True
+
+    if not getattr(ctx, "subchart_docs", []):
+        ctx.coverage.append(
+            [f"HPA '{hpa_name}' -> {key}",
+             f"UNDETERMINED - no workload here matches, and subchart(s) "
+             f"{names} were not rendered (render mode: {ctx.render_mode}), so "
+             f"the tool cannot tell a dangling reference from one satisfied "
+             f"inside a subchart. Not reported as a finding either way. To "
+             f"settle it: helm template <chart> | grep -A2 'kind: "
+             f"{ref.get('kind')}'."])
+        return True
+    return False
+
+
 def _target_ref(ctx, result, hpa, name, spec, target, seen_targets):
     ref = spec.get("scaleTargetRef")
     if not isinstance(ref, dict):
@@ -412,6 +519,8 @@ def _target_ref(ctx, result, hpa, name, spec, target, seen_targets):
         return
     key = f"{ref.get('kind')}/{ref.get('name')}"
     seen_targets.setdefault(key, []).append(name)
+    if target is None and ctx.workloads and _target_is_out_of_scope(ctx, ref, name):
+        return
     if target is None and ctx.workloads:
         _add(result, rule_id="HP041", severity=Severity.HIGH, category=Category.HPA,
              title="HPA target does not match any workload in the chart", file=hpa.file,

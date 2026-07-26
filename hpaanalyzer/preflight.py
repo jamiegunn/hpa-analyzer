@@ -9,6 +9,7 @@ Nothing here executes anything or touches a cluster.
 from dataclasses import dataclass
 from typing import List, Optional
 
+from .kube import dockerfile_jvm_evidence, jvm_evidence
 from .models import ChartContext
 
 OK, WARN, ERROR, INFO = "ok", "warn", "error", "info"
@@ -102,6 +103,23 @@ def build_preflight(ctx: ChartContext) -> Preflight:
             "analysis if you are in static mode."))
 
     # --- dockerfile / jvm -------------------------------------------------
+    #
+    # R8, tenth site - and the one the user meets FIRST, since preflight
+    # prints above the report on every run. Both branches asked "is there a
+    # Dockerfile?" and answered as if they had asked "is this a JVM?":
+    #
+    #   nginx pod, `FROM nginx:alpine`     -> "Java version undeterminable.
+    #                                         Re-run with --assume-java"
+    #   pod spec sets -Xmx1g, no Dockerfile -> "The Java/JVM and cross-file
+    #                                          categories will be N/A"
+    #
+    # The first invents a JVM and then asks the reader to name its version.
+    # The second is now simply false: measured on that exact chart, JAVA
+    # scores 94.0 and CROSS 100.0, because after R8 the heap analysis reads
+    # the pod spec. Telling someone their heap-vs-limit check did not run,
+    # when it ran and passed, is worse than saying nothing - they will go
+    # looking for a Dockerfile to satisfy a tool that did not need one.
+    chart_ev = jvm_evidence(ctx)
     if ctx.dockerfiles:
         df = ctx.dockerfiles[0]
         many = f" (+{len(ctx.dockerfiles)-1} more)" if len(ctx.dockerfiles) > 1 else ""
@@ -113,20 +131,51 @@ def build_preflight(ctx: ChartContext) -> Preflight:
             v = f"Java {df.java_major}" + (f"u{df.java_update}"
                  if df.java_update is not None and df.java_major == 8 else "")
             items.append(PreflightItem(OK, f"Dockerfile: {df.path} ({v}){many}"))
+        elif dockerfile_jvm_evidence(df):
+            # A JVM is evidenced but its version is not readable. This is the
+            # case --assume-java exists for, and now the only one that asks
+            # for it.
+            items.append(PreflightItem(
+                WARN, f"Dockerfile: {df.path} - JVM detected, version "
+                      f"undeterminable{many}.",
+                f"Evidence: {dockerfile_jvm_evidence(df)}. Common for "
+                f"internal base images. Re-run with `--assume-java <ver>` "
+                f"(e.g. 8u151, 17) so the version-dependent JVM/cgroup "
+                f"checks can run; otherwise they are skipped."))
+        elif chart_ev:
+            # No JVM in the file, but the chart evidences one elsewhere - so
+            # this Dockerfile probably is not the one that builds the
+            # workload. Say that, rather than demanding a Java version for a
+            # file that has nothing to do with Java.
+            items.append(PreflightItem(
+                OK, f"Dockerfile: {df.path} (no JVM in it){many}",
+                f"A JVM is evidenced elsewhere in this chart ({chart_ev[0]}), "
+                f"so the JVM checks run from that. If this file was meant to "
+                f"be the service image, it is not the one being analyzed."))
         else:
             items.append(PreflightItem(
-                WARN, f"Dockerfile: {df.path} - Java version undeterminable"
-                      f"{many}.",
-                "Common for internal base images. Re-run with "
-                "`--assume-java <ver>` (e.g. 8u151, 17) so the JVM/cgroup "
-                "checks can run; otherwise they are skipped."))
+                OK, f"Dockerfile: {df.path} (no JVM detected){many}",
+                "Nothing in this file indicates a JVM, so the Java/JVM "
+                "checks are reported as not assessed rather than passed. If "
+                "this IS a Java service, its JVM settings are somewhere this "
+                "tool cannot see: set them in the pod spec "
+                "(JAVA_TOOL_OPTIONS), or point the run at the directory "
+                "holding the real Dockerfile."))
+    elif chart_ev:
+        items.append(PreflightItem(
+            OK, "No Dockerfile found - JVM evidenced in the chart itself.",
+            f"{chart_ev[0]}. The Java/JVM and cross-file (heap-vs-limit) "
+            f"checks run from the pod spec; only the image-level DOCKERFILE "
+            f"category is unassessable without the file."))
     else:
         items.append(PreflightItem(
             WARN, "No Dockerfile found.",
-            "The Java/JVM and cross-file (heap-vs-limit) categories will be "
-            "N/A. Include the service Dockerfile anywhere under the directory "
-            "(any name matching Dockerfile* or *.dockerfile), or accept the "
-            "reduced scope."))
+            "The Dockerfile category will be N/A, and so will Java/JVM and "
+            "cross-file unless the pod spec carries the JVM settings (this "
+            "one does not). Include the service Dockerfile anywhere under "
+            "the directory (any name matching Dockerfile* or *.dockerfile), "
+            "set JAVA_TOOL_OPTIONS in the pod spec, or accept the reduced "
+            "scope."))
 
     # --- mode & parse health ---------------------------------------------
     if ctx.render_mode == "helm":

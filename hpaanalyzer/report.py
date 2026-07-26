@@ -1,12 +1,16 @@
 """Plain-text report renderer: scorecard, findings, proof tables, education."""
 
+import re
 import textwrap
 from datetime import datetime
 from typing import List
 
 from . import __version__
+from .kube import dockerfile_jvm_evidence, jvm_evidence
 from .models import AnalysisResult, Basis, Category, ProofTable, Severity
-from .scoring import WEIGHTS, category_scores, grade, overall_score
+from .renderplan import capability_gates
+from .scoring import (WEIGHTS, category_scores, coverage, grade,
+                      overall_score)
 
 WIDTH = 100
 
@@ -99,6 +103,205 @@ def _table(headers: List[str], rows: List[List[str]], width: int = WIDTH) -> str
 # Report body
 # ---------------------------------------------------------------------------
 
+def score_qualifier_lines(result) -> List[str]:
+    """Everything that has to be printed NEXT TO the number, or not at all.
+
+    Two qualifiers, both of which change what the number means:
+
+    1. The category denominator. The overall score is a weighted mean over
+       the categories that could be assessed; unassessed ones leave both
+       halves of the fraction. Deleting a Dockerfile therefore moves the
+       score with no Kubernetes manifest changing - measured at -1.0 on one
+       fixture and +4.4 on another (scoring.py records the run). Two scores
+       are comparable only when the assessed sets match.
+
+    2. The evidence basis. Before R5 this tool printed
+       `GRADE A+ (100.0/100)` for a chart helm had REFUSED to render, in
+       byte-identical format to a grade earned from a real render. The same
+       code knew how to print NOT GRADED elsewhere, so the machinery to
+       withhold existed; it just was not used in the case where the reader
+       would be misled. Withholding the grade here would be wrong too - the
+       static findings are real - so the grade is printed WITH its basis
+       attached rather than dressed up as something it is not.
+
+    3. R9's UNDETERMINED verdicts. The budget table can now say "I cannot
+       tell whether this JVM fits", and C2.5 forbids scoring that - the
+       tool's ignorance is not the user's defect - so the number does not
+       move. On `fixtures/good-chart` the result was a report whose page 3
+       says UNDETERMINED and whose terminal block, the eleven lines almost
+       every reader actually sees, said:
+
+           GRADE A+  (100.0/100)   0 critical, 0 high, 0 medium, 0 low
+           No critical or high findings.
+
+       Both statements are true and together they are the pre-R9 defect
+       exactly, moved one screen up: a categorical answer where the tool has
+       none. Not scoring it was right; letting the summary imply a pass was
+       not. So it is printed here, beside the number, in the same place the
+       denominator and the render basis are - because "everything that has
+       to be printed next to the number" is what this function is for, and
+       an unanswerable question about whether the workload OOMs qualifies.
+
+    Returns [] only when the score is over all ten categories AND came from
+    a real helm render AND every JVM fit question was answerable; then there
+    is nothing to qualify.
+    """
+    lines: List[str] = []
+    cov = coverage(result)
+    if not cov.complete:
+        lines.append(cov.one_line())
+    mode = getattr(result.context, "render_mode", "static")
+    if not mode.startswith("helm"):
+        lines.append(f"Evidence: static template parsing, NOT a helm render "
+                     f"({mode}) - see the coverage section.")
+    lines.extend(undetermined_fit_lines(result))
+    return lines
+
+
+def undetermined_fit_lines(result) -> List[str]:
+    """One line per container whose JVM fit the tool could not decide.
+
+    Sourced from the coverage rows proofs.py writes rather than recomputed,
+    so the summary cannot disagree with the table it is summarising. The
+    range is echoed because "UNDETERMINED" on its own invites the reader to
+    assume the tool is being coy about a small doubt; `722 MiB - 1.2 GiB`
+    against a 1 GiB limit tells them the doubt spans the answer.
+    """
+    out: List[str] = []
+    for row in getattr(result.context, "coverage", []) or []:
+        if not (str(row[0]).startswith("JVM memory fit")
+                and "UNDETERMINED" in str(row[1])):
+            continue
+        who = str(row[0])[len("JVM memory fit - "):] or "this container"
+        # The range is `722 MiB-1.2 GiB` - a value with a space inside it, on
+        # both sides of a hyphen. A first draft ended the capture at `\S+`
+        # and printed "model range 722", which is not a range, is not a
+        # quantity, and is the one number in the sentence that means nothing
+        # on its own. Anchored on the following clause instead.
+        m = re.search(r"the limit (.+?) lies inside the model's range "
+                      r"(.+?), so ", str(row[1]))
+        span = f" (limit {m.group(1)} vs model range {m.group(2)})" if m else ""
+        # The remedy is taken from the row too, for the same reason the range
+        # is: after a partial `--measured` run the flags that would settle it
+        # are not the ones a canned sentence would name. proofs.py computes
+        # that list from the components still estimated; repeating the
+        # computation here would be a second place for it to drift.
+        f = re.search(r"re-run with --measured (\S+)\s*$", str(row[1]))
+        how = f" Settle it with `--measured {f.group(1)}`." if f else \
+            " Settle it by measuring the non-heap components (--measured)."
+        out.append(f"JVM fit UNDETERMINED{span} for {who} - not scored, "
+                   f"and NOT a pass.{how}")
+    return out
+
+
+def render_mode_paragraphs(ctx) -> List[str]:
+    """What the reader must know about WHERE these facts came from.
+
+    Three states, not two. Before R4 the report had only "helm rendered it"
+    and "helm did not render it", and the second one always ended with
+    "Install helm on PATH and re-run" - which is excellent advice when helm
+    is missing and actively misleading when helm is installed, ran, and
+    refused the chart because its declared kubeVersion excludes helm's
+    compiled-in v1.20.0 default. That reader installs helm twice and gets the
+    same report, because the thing to fix was never the missing binary.
+    """
+    out: List[str] = []
+    if ctx.render_mode == "helm":
+        at = ctx.render_kube_version
+        if at:
+            out.append(
+                f"Mode: `helm template --kube-version {at}` rendered the chart "
+                f"with its real template engine, so conditional logic, loops "
+                f"and helpers are evaluated exactly as a deploy would. "
+                f"Manifests below are rendered truth FOR A {at} CLUSTER - "
+                f"`.Capabilities.KubeVersion` was answered for that version "
+                f"and no other. Why {at}: {ctx.render_version_reason}. "
+                f"Pass --kube-version to render for the cluster you actually "
+                f"run.")
+        else:
+            out.append(
+                "Mode: `helm template` rendered the chart with its real "
+                "template engine, but NO --kube-version could be derived "
+                f"({ctx.render_version_reason or 'chart declares no kubeVersion'}), "
+                "so helm used its compiled-in default of v1.20.0 - a release "
+                "that reached end of life in February 2022. Any "
+                "`.Capabilities` test in these templates was answered for "
+                "v1.20.0. Pass --kube-version to fix that.")
+        out.append(
+            "Templates that do not render with these values were additionally "
+            "analyzed statically and are labeled 'conditional' wherever they "
+            "appear.")
+        # The one capability `--kube-version` does NOT control. Stated here
+        # rather than only in CH016 because it qualifies the phrase "rendered
+        # truth" three lines above, and a qualification the reader meets 200
+        # lines later has already failed.
+        gates = capability_gates(ctx.template_raw)
+        if gates:
+            gvs = sorted({g for _p, _l, g in gates if g})
+            out.append(
+                f"One capability was NOT answered for {at or 'that version'}: "
+                f"this chart branches on `.Capabilities.APIVersions` in "
+                + ", ".join(sorted({p for p, _l, _g in gates}))
+                + (f" (querying {', '.join(gvs)})" if gvs else "")
+                + ". Under `helm template` that set is the group/versions "
+                  "compiled into the helm binary, identical at every "
+                  "--kube-version and matching no real cluster, and "
+                  "`--api-versions` can only add to it. The arm helm took is "
+                  "therefore not evidence about your cluster and the other arm "
+                  "was never analyzed. See CH016.")
+        div = ctx.render_divergence
+        if div and div.get("checked") and div.get("diverges"):
+            only_at = ", ".join(div.get("only_at") or []) or "(none)"
+            only_probe = ", ".join(div.get("only_at_probe") or []) or "(none)"
+            out.append(
+                f"This chart does NOT emit the same objects across its own "
+                f"declared range: at {div['at']} it emits {only_at} which it "
+                f"does not emit at {div['probe']}, and at {div['probe']} it "
+                f"emits {only_probe} which it does not emit at {div['at']}. "
+                f"This report describes the {div['at']} render. See CH015.")
+        elif div and div.get("checked"):
+            out.append(
+                f"Cross-checked: rendering at {div['probe']} (the bottom of "
+                f"the chart's declared range) emits the same "
+                f"{div['n_probe']} object(s), so this report's object set does "
+                f"not depend on which end of the range was chosen.")
+        elif div and not div.get("checked"):
+            out.append(
+                f"NOT cross-checked: the second render at {div.get('probe')} "
+                f"failed ({div.get('error')}), so whether this chart emits the "
+                f"same objects across its declared range is unknown - not "
+                f"confirmed.")
+        return out
+
+    # --- static ----------------------------------------------------------
+    out.append(
+        f"Analysis mode: {ctx.render_mode}. Templates were parsed with "
+        "Go-template expressions scrubbed and, where possible, resolved from "
+        "values.yaml, WITHOUT executing helm. Conditional blocks are analyzed "
+        "as if taken; complex expressions (tpl, printf, required, subcharts) "
+        "are beyond static resolution and files that failed to parse produced "
+        "no findings at all - the coverage section lists every such gap.")
+    if not ctx.helm_present:
+        out.append(
+            "helm is not on PATH. Installing it and re-running upgrades this "
+            "report to rendered-truth analysis, which materially improves "
+            "precision.")
+    elif ctx.helm_error:
+        out.append(
+            f"helm IS installed - installing it again will not change this "
+            f"report. It ran and refused the chart: {ctx.helm_error}. "
+            f"The usual cause is that helm defaults to a v1.20.0 cluster "
+            f"(pkg/chartutil/capabilities.go) and enforces the chart's own "
+            f"kubeVersion against it. Re-run with an explicit "
+            f"--kube-version matching your cluster, e.g. "
+            f"`--kube-version 1.31.0`.")
+    else:
+        out.append(
+            "helm is installed but was not used for this run (--helm off, or "
+            "no chart directory was found).")
+    return out
+
+
 def stdout_summary(result: AnalysisResult, report_path: str,
                    html_path: str = None) -> str:
     """The terminal-first answer: grade, counts, the top fixes, and where the
@@ -116,6 +319,12 @@ def stdout_summary(result: AnalysisResult, report_path: str,
                  f"{counts[Severity.CRITICAL]} critical, "
                  f"{counts[Severity.HIGH]} high, "
                  f"{counts[Severity.MEDIUM]} medium, {counts[Severity.LOW]} low")
+        # The denominator travels with the number. A score computed over
+        # seven categories must not be readable as if it were computed over
+        # ten - see scoring.py for the measured case where deleting a file
+        # RAISED the score by 4.4 points.
+        for line in score_qualifier_lines(result):
+            L.append(f"  {line}")
     top = [f for f in findings
            if f.severity in (Severity.CRITICAL, Severity.HIGH)]
     if top:
@@ -128,7 +337,13 @@ def stdout_summary(result: AnalysisResult, report_path: str,
             L.append(f"    ... +{len(top) - 5} more critical/high "
                      f"(see report)")
     elif score is not None:
-        L.append("  No critical or high findings.")
+        # C2.5: absence of a finding is not a claim of correctness. It is
+        # nearly one when the tool has just said it cannot decide whether the
+        # workload OOMs, so that case gets its own wording rather than the
+        # clean-baseline one.
+        L.append("  No critical or high findings"
+                 + (" - but see the UNDETERMINED item above."
+                    if undetermined_fit_lines(result) else "."))
     tail = f"  Full report: {report_path}"
     if html_path:
         tail += f"   |   HTML: {html_path}"
@@ -176,12 +391,39 @@ def render(result: AnalysisResult, target: str, external=None,
     for p in ctx.template_files:
         inv.append(f"  template   : {p}")
     for d in ctx.dockerfiles:
-        java = (f"Java {d.java_major}" + (f"u{d.java_update}" if d.java_update
-                and d.java_major == 8 else
-                (f".0.{d.java_update}" if d.java_update and d.java_major != 8 else ""))
-                if d.java_major else "Java version unknown")
+        # R8, fifth site. "Java version unknown" is a statement about a JVM
+        # whose version could not be read. Printed against `FROM nginx:alpine`
+        # it is instead a statement that there is a JVM here at all, which is
+        # the invention half of R8 wearing a different hat - and it is the
+        # FIRST line of the report, so it frames everything under it. Ask the
+        # evidence function, not the filename: unknown version and no version
+        # are different facts and the inventory has to distinguish them.
+        if d.java_major:
+            java = f"Java {d.java_major}" + (
+                f"u{d.java_update}" if d.java_update and d.java_major == 8 else
+                (f".0.{d.java_update}" if d.java_update and d.java_major != 8
+                 else ""))
+        elif dockerfile_jvm_evidence(d):
+            java = "Java version unknown"
+        else:
+            java = "no JVM detected"
         inv.append(f"  dockerfile : {d.path}  [{java}"
                    f"{', ' + d.java_flavor if d.java_flavor else ''}]")
+    # R8, thirteenth site - a gap rather than a wrong answer, and it survived
+    # the first twelve because nothing here was false. The inventory is a list
+    # of FILES, so on the chart whose JVM is declared in its pod spec and
+    # nowhere else it said nothing about a JVM at all - while the same chart's
+    # report went on to compute heap-vs-limit arithmetic and raise a CRITICAL.
+    # The reader's first block has to state the finding that everything below
+    # it rests on, and "which file was that in" is the wrong axis for a fact
+    # that need not live in a file.
+    _jev = jvm_evidence(ctx)
+    _jtext = (_jev[0] if _jev else
+              "none detected (checked pod-spec env, container image names, "
+              "Dockerfile FROM/flags)")
+    _jlines = textwrap.wrap(_jtext, width=WIDTH - 15) or [_jtext]
+    inv.append(f"  jvm        : {_jlines[0]}")
+    inv.extend(" " * 15 + ln for ln in _jlines[1:])
     L.extend(inv or ["  (nothing found)"])
 
     # verbosity: full implies the teaching appendix and expanded LOW/INFO
@@ -206,6 +448,41 @@ def render(result: AnalysisResult, target: str, external=None,
         bar = int(round(score / 2))
         L.append(f"  OVERALL QUALITY SCORE : {score:5.1f} / 100   GRADE: {g}")
         L.append(f"  [{'#' * bar}{'.' * (50 - bar)}]")
+        cov = coverage(result)
+        L.append("")
+        L.append(_wrap(
+            f"What this number is: a weighted count of what THIS TOOL found. "
+            f"Each category starts at 100 and loses points per finding. It is "
+            f"not an estimate of risk and not a prediction that the service "
+            f"will hold up - a chart can score {100.0:.0f} and still fall over, "
+            f"because only the things the tool knows how to look for can "
+            f"subtract.", indent=2))
+        L.append("")
+        if cov.complete:
+            L.append(f"  {'Computed over':<21} : all {cov.n_total} categories "
+                     f"({cov.weight_total} of {cov.weight_total} weight points)")
+        else:
+            L.append(f"  {'Computed over':<21} : {cov.n_assessed} of "
+                     f"{cov.n_total} categories ({cov.weight_assessed} of "
+                     f"{cov.weight_total} weight points)")
+            L.append(f"  {'NOT assessed':<21} :")
+            for cat, reason in cov.unassessed:
+                L.append(_wrap(f"{cat.value} - {reason}", indent=6))
+            L.append("")
+            L.append(_wrap(
+                "This score is therefore NOT comparable with a score computed "
+                "over a different set of categories. Adding the missing input "
+                "can move it in either direction, because the excluded "
+                "categories leave the numerator and the denominator together: "
+                "on one of this project's own fixtures, deleting the Dockerfile "
+                "RAISED the score by 4.4 points with every Kubernetes manifest "
+                "byte-identical. Compare runs only when these lists match.",
+                indent=2))
+            L.append("")
+        for line in score_qualifier_lines(result):
+            if line.startswith("Evidence:"):
+                L.append("")
+                L.append(_wrap(line, indent=2))
     L.append(f"  Analysis mode         : {ctx.render_mode}")
     L.append("")
     L.append(f"  Findings: {counts[Severity.CRITICAL]} critical, "
@@ -231,6 +508,9 @@ def render(result: AnalysisResult, target: str, external=None,
                            f"see the Findings section below.", indent=4))
     elif counts[Severity.HIGH]:
         L.append("\n  No critical findings; start with the HIGH severity list below.")
+    elif undetermined_fit_lines(result):
+        L.append("\n  No critical or high findings - but the JVM memory fit "
+                 "below is UNDETERMINED, which is not the same as a pass.")
     else:
         L.append("\n  No critical or high findings - solid baseline.")
 
@@ -248,19 +528,9 @@ def render(result: AnalysisResult, target: str, external=None,
                             [list(row) for row in ctx.coverage]))
         else:
             L.append("  (no coverage records - nothing was analyzable)")
-        if ctx.render_mode == "helm":
-            L.append(_wrap("\nMode: `helm template` rendered the chart with its "
-                           "real template engine - manifests below are rendered "
-                           "truth for the analyzed values. Objects marked "
-                           "'conditional' exist in templates but do not render "
-                           "with these values.", indent=0))
-        else:
-            L.append(_wrap(f"\nMode: {ctx.render_mode}. Static scrubbing "
-                           f"approximates helm rendering: conditionals are "
-                           f"analyzed as taken and complex template expressions "
-                           f"may hide configuration from these checks. Install "
-                           f"helm on PATH and re-run for rendered-truth analysis "
-                           f"- it materially improves precision.", indent=0))
+        L.append("")
+        for para in render_mode_paragraphs(ctx):
+            L.append(_wrap(para, indent=0))
 
     # ----- scorecard (all levels) ------------------------------------------
     L.append(sec("Scorecard by category"))
@@ -272,16 +542,34 @@ def render(result: AnalysisResult, target: str, external=None,
                       Severity.LOW) if any(f.severity is s for f in cfind)) or "-"
         rows.append([
             cat.value,
-            "N/A" if cscore is None else f"{cscore:5.1f}",
-            "N/A" if cscore is None else grade(cscore),
+            "not assessed" if cscore is None else f"{cscore:5.1f}",
+            "-" if cscore is None else grade(cscore),
             str(WEIGHTS[cat]),
             n_by_sev,
         ])
     L.append(_table(["Category", "Score", "Grade", "Weight", "Findings (C/H/M/L)"], rows))
+    cov = coverage(result)
+    if cov.unassessed:
+        L.append("")
+        L.append("  Why a category is 'not assessed':")
+        for cat, reason in cov.unassessed:
+            L.append(_wrap(f"{cat.value} - {reason}", indent=6))
+    # The pre-R5 wording here was "N/A categories are excluded, not free
+    # points". True as far as it went, and it left the reader believing
+    # exclusion was safe. Exclusion RENORMALISES: the remaining categories
+    # are re-weighted over a smaller denominator, which moves the score in
+    # whichever direction the dropped categories sat relative to the rest.
     L.append(_wrap("\nScoring model: each category starts at 100; deductions "
                    "are CRITICAL -25, HIGH -12, MEDIUM -6, LOW -3, INFO -0, "
-                   "floored at 0. Overall = weighted mean over applicable "
-                   "categories (N/A categories are excluded, not free points)."))
+                   "floored at 0. Overall = weighted mean over the ASSESSED "
+                   "categories only. An unassessed category is not scored 0 "
+                   "and not scored 100 - there is no honest number for "
+                   "'not looked at' - so it leaves the mean entirely, "
+                   "numerator and denominator together. That renormalises "
+                   "the rest, which is why the overall score above is "
+                   "printed with the count it was computed over, and why two "
+                   "scores are only comparable when those counts and these "
+                   "N/A rows match."))
 
     if level == "summary":
         # ----- compact top findings, then pointer --------------------------
@@ -386,10 +674,29 @@ def render(result: AnalysisResult, target: str, external=None,
             L.append(sec("External validators - independent cross-check"))
             L.append(_wrap(
                 "hpa-analyzer did not write these tools and does not vouch for "
-                "their output - it ran them and reports their exit status and "
-                "output verbatim. Absent tools show an install command. Tools "
+                "their output - it ran them and reports their own findings "
+                "verbatim. Absent tools show an install command. Tools "
                 "that need rendered manifests are skipped (with a reason) when "
                 "helm is unavailable to render."))
+            L.append(_wrap(
+                "The Status column is NOT a re-reading of each tool's exit "
+                "code. Two of these tools do not encode a verdict in their "
+                "exit status at all: polaris exits 0 whether it found nothing "
+                "or found danger, and kube-score exits 1 both when it dislikes "
+                "a manifest and when it could not parse one. Status is derived "
+                "from each tool's own printed tally instead, and the 'derived "
+                "from' line under each tool names exactly which signal was "
+                "read. The raw output is printed below each tool so you can "
+                "check the transcription; long output is cut, and where it is "
+                "cut the excerpt says how many lines were dropped - the "
+                "tallies are computed over the full output, so counting the "
+                "excerpt alone will undercount."))
+            L.append(_wrap(
+                "Status is three-state on purpose. UNKNOWN means the validator "
+                "ran and could not reach a verdict - most often because it "
+                "could not fetch a schema - and is NOT a failure of your "
+                "chart. Reading a non-zero exit as FAIL would tell you your "
+                "manifests are broken when nothing was actually checked."))
             xrows = []
             for e in external:
                 if not e.installed:
@@ -397,11 +704,17 @@ def render(result: AnalysisResult, target: str, external=None,
                 elif not e.ran:
                     status = "skipped"
                 else:
-                    status = "PASS" if e.ok else "FAIL"
-                xrows.append([e.name, status, e.summary])
+                    status = e.verdict
+                summary = e.summary
+                if e.indeterminate and e.indeterminate_why:
+                    summary = f"{summary}  [{e.indeterminate_why}]"
+                xrows.append([e.name, status, summary])
             L.append("")
             L.append(_table(["Tool", "Status", "Result / reason"], xrows))
             for e in external:
+                if e.ran and e.verdict_basis:
+                    L.append(_wrap(f"{e.name} status derived from: "
+                                   f"{e.verdict_basis}", indent=2))
                 if e.detail and e.ran:
                     L.append(f"\n  --- {e.name} output " + "-" * 40)
                     for ln in e.detail.splitlines():
@@ -413,27 +726,11 @@ def render(result: AnalysisResult, target: str, external=None,
         # ----- education (only when teaching) ------------------------------
         if teach:
             L.append(sec("Education appendix - why this math matters"))
-            L.append(_education())
+            L.append(_education(jvm_evidence(ctx)))
 
     # ----- methodology (all levels) ----------------------------------------
     L.append(sec("Methodology and limitations"))
-    if ctx.render_mode == "helm":
-        mode_para = (
-            "Manifests were produced by `helm template` - the real template "
-            "engine with the analyzed values - so conditional logic, loops "
-            "and helpers are evaluated exactly as a deploy would. Templates "
-            "that do not render with these values were additionally analyzed "
-            "statically and are labeled 'conditional' wherever they appear. ")
-    else:
-        mode_para = (
-            f"Analysis mode: {ctx.render_mode}. Templates were parsed with "
-            "Go-template expressions scrubbed and, where possible, resolved "
-            "from values.yaml, WITHOUT executing helm. Conditional blocks "
-            "are analyzed as if taken; complex expressions (tpl, printf, "
-            "required, subcharts) are beyond static resolution and files "
-            "that failed to parse produced no findings at all - the "
-            "coverage section lists every such gap. Installing helm and "
-            "re-running upgrades this report to rendered-truth analysis. ")
+    mode_para = " ".join(render_mode_paragraphs(ctx)) + " "
     L.append(_wrap(
         mode_para +
         "Numeric estimates (metaspace, thread counts, node sizes, startup "
@@ -454,7 +751,26 @@ def render(result: AnalysisResult, target: str, external=None,
 # Static education content
 # ---------------------------------------------------------------------------
 
-def _education() -> str:
+def _education(jvm_ev=None) -> str:
+    """The reference appendix. `jvm_ev` is jvm_evidence(ctx) for the chart
+    being reported on, or None/empty when nothing in it indicates a JVM.
+
+    R8, twelfth site, and the only one where the remedy is NOT to remove the
+    JVM material. Sections 6.2-6.4 are a manual, not a claim about the target:
+    printing them does not assert that this chart runs Java. But four JVM
+    chapters in a report about an nginx pod read as an assertion whether or
+    not one was made, and the reader has no way to tell a reference chapter
+    from a conclusion.
+
+    Deleting them for non-JVM charts would be the wrong fix, and CLAIM 6 of
+    proof/p8b_bar2.py is the reason: the reader this tool CANNOT detect - the
+    opaque `corp.registry/payments-api:4.2` image with its flags baked in - is
+    a Java operator whose report says "no JVM evidence". Withholding the heap
+    arithmetic from exactly that person would turn an admitted blind spot into
+    a withheld explanation. So the material stays and is labelled instead:
+    reference, not finding, with the detection result stated so the reader can
+    place it.
+    """
     E: List[str] = []
 
     E.append("\n6.1  THE HPA CONTROL LOOP\n")
@@ -475,6 +791,16 @@ def _education() -> str:
                    "mark).", indent=6))
 
     E.append("\n6.2  THE JVM MEMORY MODEL IN A CONTAINER\n")
+    if not jvm_ev:
+        E.append(_wrap(
+            "[reference only - nothing in this chart indicates a JVM, so "
+            "6.2-6.4 describe a runtime that was NOT detected here and no "
+            "finding in this report rests on them. They are kept because a "
+            "JVM whose flags are baked into an opaque image is invisible to "
+            "this tool: if that is your workload, this is the arithmetic it "
+            "would have checked.]", indent=2))
+    else:
+        E.append(_wrap(f"[applies to this chart - {jvm_ev[0]}]", indent=2))
     E.append("      container limit (cgroup memory.max)  <-- kernel kills here (exit 137)")
     E.append("      +--------------------------------------------------+")
     E.append("      |  heap (-Xmx / MaxRAMPercentage)                  |")

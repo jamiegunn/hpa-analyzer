@@ -1,0 +1,14 @@
+replicaCount: 3
+image:
+  repository: registry.example.com/payments
+  tag: "3.2.1"
+  pullPolicy: IfNotPresent
+resources:
+  requests:
+    cpu: 1
+    memory: 2Gi
+  limits:
+    cpu: 1
+    memory: 2Gi
+service:
+  port: 8080

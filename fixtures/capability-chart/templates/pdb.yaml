@@ -1,0 +1,17 @@
+{{- /*
+  The other arm of the same branch, gated the opposite way on purpose: at the
+  BOTTOM of the declared range this chart emits a PDB and no HPA, at the top
+  an HPA and no PDB. The divergence is therefore visible in both directions
+  and cannot be mistaken for "the newer render simply has more objects".
+*/ -}}
+{{- if not (semverCompare ">=1.23-0" .Capabilities.KubeVersion.Version) }}
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Chart.Name }}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+{{- end }}

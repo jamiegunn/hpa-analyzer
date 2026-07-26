@@ -1,0 +1,28 @@
+# Both objects were removed in the SAME Kubernetes release (1.22) and live
+# three lines apart. Before R3 the analyzer's table listed Role and not
+# RoleBinding, so this file produced one finding and one silence - and silence
+# from that table is indistinguishable from a clean bill of health.
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  name: legacy-ingress
+  labels:
+    app.kubernetes.io/name: legacy-ingress
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: legacy-ingress
+  labels:
+    app.kubernetes.io/name: legacy-ingress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: legacy-ingress
+subjects:
+  - kind: ServiceAccount
+    name: legacy-ingress

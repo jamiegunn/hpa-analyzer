@@ -5,7 +5,8 @@
 Exit codes (CI-gateable):
     0  analysis ran; no gate violated
     1  a gate was violated (--fail-on threshold hit, or score < --min-score,
-       or the input was ungradeable while a gate was requested)
+       or --require-coverage with an unassessed category, or the input was
+       ungradeable while a gate was requested)
     2  usage / IO error
 """
 
@@ -31,7 +32,7 @@ from .clusterprobes import build_probes as _cluster_probes
 from .engine import analyze
 from .models import Severity
 from .report import render
-from .scoring import grade, overall_score
+from .scoring import coverage, grade, overall_score
 
 _SEV_ORDER = ["none", "low", "medium", "high", "critical"]
 
@@ -78,9 +79,25 @@ def main(argv=None) -> int:
     g_an.add_argument("--helm", choices=("auto", "on", "off"), default="auto",
                       help="render via the helm binary: auto (default, if on "
                            "PATH), on (require it), off (static only)")
+    g_an.add_argument("--kube-version", metavar="VER", dest="kube_version",
+                      help="Kubernetes version to render the chart FOR, e.g. "
+                           "1.31.0. Passed to `helm template --kube-version`. "
+                           "Without it the tool derives one from the chart's "
+                           "own kubeVersion; without THAT, helm falls back to "
+                           "its compiled-in v1.20.0, which is EOL and will "
+                           "refuse most modern charts.")
     g_an.add_argument("--assume-java", metavar="VER",
                       help="Java version to assume when the base image tag "
                            "hides it (e.g. 8, 8u151, 11.0.16, 17)")
+    g_an.add_argument("--measured", metavar="K=V[,K=V]", action="append",
+                      help="replace an estimated JVM memory component with a "
+                           "number you measured, e.g. "
+                           "--measured metaspace=210Mi,threads=180. Keys: "
+                           "metaspace, codecache, threads, direct, gc, xss. "
+                           "Sizes take Ki/Mi/Gi or k/M/G; threads is a plain "
+                           "count. A measured component becomes OBSERVED, "
+                           "drops out of the budget's range, and stops being "
+                           "able to make the fit UNDETERMINED.")
     g_an.add_argument("--check", action="store_true",
                       help="input check ONLY: report what was discovered and "
                            "what looks misplaced, then exit without analyzing "
@@ -92,7 +109,16 @@ def main(argv=None) -> int:
                            "exists")
     g_ci.add_argument("--min-score", type=float, metavar="N",
                       help="exit 1 if the score is below N (ungradeable also "
-                           "fails)")
+                           "fails). NOTE: the score is a weighted mean over "
+                           "the categories that could be assessed, so a run "
+                           "that loses an input (e.g. the Dockerfile) is "
+                           "compared on a different scale - see "
+                           "--require-coverage")
+    g_ci.add_argument("--require-coverage", action="store_true",
+                      help="exit 1 if any scoring category could not be "
+                           "assessed. Use with --min-score in CI: without it, "
+                           "deleting an input silently changes the scale the "
+                           "threshold is compared against")
     g_ci.add_argument("--json", metavar="PATH", dest="json_path",
                       help="also write machine-readable findings to PATH")
 
@@ -123,7 +149,30 @@ def main(argv=None) -> int:
                   f"(expected forms: 8, 8u151, 11.0.16, 17)", file=sys.stderr)
             return 2
 
-    result = analyze(target, helm_mode=args.helm, assume_java=args.assume_java)
+    # An unparseable --kube-version is a usage error, not a silent fallback:
+    # falling back would render for a cluster the user did not ask for and
+    # then call the result "rendered truth".
+    if args.kube_version:
+        from .kubeversion import parse_version
+        if parse_version(args.kube_version) is None:
+            print(f"error: --kube-version '{args.kube_version}' is not a "
+                  f"version (expected forms: 1.31, 1.31.0, v1.31.0)",
+                  file=sys.stderr)
+            return 2
+
+    # Same rule as --assume-java: a value the tool cannot parse is a USAGE
+    # error at exit 2, not a silent fallback to the estimate it was meant to
+    # replace. Silently ignoring it would print "est." next to a number the
+    # user believes they measured.
+    from .proofs import parse_measured
+    try:
+        measured = parse_measured(args.measured)
+    except ValueError as e:
+        print(f"error: --measured {e}", file=sys.stderr)
+        return 2
+
+    result = analyze(target, helm_mode=args.helm, assume_java=args.assume_java,
+                     kube_version=args.kube_version, measured=measured)
     ctx = result.context
 
     # --- guided input check (always computed; --check exits here) ---------
@@ -145,7 +194,8 @@ def main(argv=None) -> int:
     external = None
     if args.cross_check:
         from .external import run_cross_check
-        external = run_cross_check(ctx.chart_dir_abs)
+        external = run_cross_check(ctx.chart_dir_abs,
+                                   kube_version=ctx.render_kube_version)
 
     level = "summary" if args.summary else "full" if args.full else "default"
     text = render(result, target, external=external, level=level,
@@ -170,6 +220,7 @@ def main(argv=None) -> int:
             return 2
 
     score = overall_score(result)
+    _cov = coverage(result)
     if args.json_path:
         payload = {
             "target": target,
@@ -177,6 +228,17 @@ def main(argv=None) -> int:
             "score": round(score, 1) if score is not None else None,
             "grade": grade(score) if score is not None else None,
             "graded": score is not None,
+            # A consumer that reads "score" without reading this cannot tell
+            # a 51.8 over 7 categories from a 51.8 over 10.
+            "score_coverage": {
+                "assessed": [c.name for c in _cov.assessed],
+                "unassessed": [{"category": c.name, "reason": r}
+                               for c, r in _cov.unassessed],
+                "weight_assessed": _cov.weight_assessed,
+                "weight_total": _cov.weight_total,
+                "complete": _cov.complete,
+                "note": _cov.one_line(),
+            },
             "counts": {s.label.lower(): sum(1 for f in result.findings
                                             if f.severity is s)
                        for s in Severity},
@@ -195,8 +257,18 @@ def main(argv=None) -> int:
             } for p in _cluster_probes(result)],
             "preflight": [{"status": i.status, "label": i.label, "hint": i.hint}
                           for i in pf.items],
+            # `ok` alone is not enough for a consumer to audit a verdict, and
+            # a consumer that cannot audit it will treat it as this project's
+            # opinion rather than the other tool's. `verdict_basis` names the
+            # signal the verdict came from and `tally` gives the counts it was
+            # computed from, so a machine reader can recompute it or disagree.
             "cross_check": ([{"tool": e.name, "installed": e.installed,
                               "ran": e.ran, "ok": e.ok, "summary": e.summary,
+                              "verdict": e.verdict,
+                              "verdict_basis": e.verdict_basis,
+                              "tally": e.tally,
+                              "indeterminate": e.indeterminate,
+                              "indeterminate_why": e.indeterminate_why,
                               "manual_cmd": e.manual_cmd,
                               "install_hint": e.install_hint}
                              for e in external] if external else []),
@@ -211,7 +283,13 @@ def main(argv=None) -> int:
     # terminal-first: the answer (grade + top fixes) prints HERE, so an SRE
     # never has to open a file to know what to do. --quiet drops to one line.
     if args.quiet:
-        score_str = (f"score {score:.1f}/100 (grade {grade(score)})"
+        # Even one line carries the denominator: `score 51.8/100` alone is
+        # the exact string a reader would diff against another run, and two
+        # runs over different category sets are not comparable (scoring.py).
+        cov = coverage(result)
+        over = ("" if cov.complete
+                else f" over {cov.n_assessed}/{cov.n_total} categories")
+        score_str = (f"score {score:.1f}/100 (grade {grade(score)}){over}"
                      if score is not None else "NOT GRADED")
         print(f"hpa-analyzer [{ctx.render_mode}]: {score_str}, "
               f"{len(result.findings)} finding(s) -> {os.path.abspath(args.output)}")
@@ -245,6 +323,32 @@ def main(argv=None) -> int:
             print(f"gate: score {score:.1f} < --min-score={args.min_score}",
                   file=sys.stderr)
             failed = True
+        # R5: a threshold is a comparison, and a comparison needs a scale. The
+        # score is a weighted mean over the categories that could be assessed,
+        # so a run that loses an input is measured on a different scale than
+        # the run before it - and CI reads the exit code, not the report, so
+        # the coverage block added to the report cannot help here. Measured on
+        # this project's own fixture: bad-chart scores 45.5, and deleting its
+        # Dockerfile - with every Kubernetes manifest byte-identical - scores
+        # 49.9. Any threshold in that band is a red build that turns green
+        # for deleting a file. (The band was 45.5 -> 51.8 when this was
+        # written and the example read `--min-score 50`; R8 recovered a HIGH
+        # that the missing file had been hiding, so the gap narrowed and a
+        # literal 50 stopped sitting inside it. proof/p5b_bar2.py now derives
+        # its threshold from the measured pair for exactly that reason - a
+        # number written into prose is a number that goes stale silently,
+        # which is the same disease as the one this block exists to treat.)
+        # The note below puts that in the CI
+        # log on every run, pass or fail; --require-coverage turns it into an
+        # actual gate, because a log line does not stop a deploy.
+        if not _cov.complete:
+            print(f"gate: {_cov.one_line()} A threshold compared against a "
+                  f"score over a different set of categories is not the same "
+                  f"comparison - pass --require-coverage to gate on this.",
+                  file=sys.stderr)
+    if args.require_coverage and not _cov.complete:
+        print(f"gate: --require-coverage: {_cov.one_line()}", file=sys.stderr)
+        failed = True
     return 1 if failed else 0
 
 
