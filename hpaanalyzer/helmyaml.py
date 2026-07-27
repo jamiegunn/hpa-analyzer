@@ -15,7 +15,7 @@ the merged values so checks see the *effective* configuration.
 """
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import yaml
 

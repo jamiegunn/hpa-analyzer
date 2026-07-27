@@ -67,7 +67,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nativeoverride  # noqa: F401,E402  (sets HPA_ANALYZER_ALLOW_NATIVE - see the module for why)
 
-from baseline import BASELINE, resolve as _resolve_baseline  # noqa: E402
+from baseline import resolve as _resolve_baseline  # noqa: E402
 
 BASELINE_SHA = _resolve_baseline(REPO)
 

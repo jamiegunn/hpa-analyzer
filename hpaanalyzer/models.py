@@ -244,6 +244,10 @@ class ChartContext:
     # cluster the "rendered truth" is true ABOUT, instead of implying it is
     # true everywhere. See renderplan.py.
     helm_present: bool = False           # helm was on PATH, whatever happened next
+    # The version the installed helm renders for when --kube-version is
+    # omitted - measured from the binary (helm 3: 1.20.0; helm 4.2: 1.36.0;
+    # drifts per helm release), None when helm is absent or the probe failed.
+    helm_default_version: Optional[str] = None
     render_kube_version: Optional[str] = None   # value passed to --kube-version
     render_version_source: str = ""      # user | chart-ceiling | known-latest | ...
     render_version_reason: str = ""      # one line, report-ready

@@ -65,7 +65,6 @@ subprocess over real directories.
 Run: python3 proof/p9b_bar2.py
 """
 
-import copy
 import hashlib
 import json
 import os
@@ -609,7 +608,6 @@ _ms = re.search(_ROW, flat(_after))
 # than mine.
 from hpaanalyzer.models import MeasuredValues as _MV               # noqa: E402
 from hpaanalyzer.proofs import parse_measured as _pm               # noqa: E402
-from hpaanalyzer import report as _R                               # noqa: E402
 from hpaanalyzer.engine import analyze as _an                      # noqa: E402
 
 with mock.patch.object(_MV, "cite", lambda self, k: f"{k}={self[k]}"):

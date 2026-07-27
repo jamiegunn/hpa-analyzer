@@ -1,7 +1,7 @@
 """Checks: workload resources/QoS, probes, availability, security posture."""
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from . import qos as qosmod
 from .helmyaml import is_unresolved, line_of
@@ -248,7 +248,7 @@ def _resources(ctx, result, doc, where):
                          "the kernel and the JVM account memory.")
 
         missing_req = req_cpu is None or req_mem is None
-        if missing_req and not (res is None):
+        if missing_req and res is not None:
             missing = [n for n, v in (("cpu", req_cpu_raw), ("memory", req_mem_raw)) if v is None]
             if missing:
                 _add(result, rule_id="RS004", severity=Severity.HIGH, category=Category.RESOURCES,

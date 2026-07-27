@@ -8,7 +8,7 @@ vars, JVM flags embedded in ENTRYPOINT/CMD, and lifecycle-relevant facts
 
 import re
 import shlex
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .models import DockerfileInfo
 

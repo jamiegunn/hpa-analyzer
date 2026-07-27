@@ -1,0 +1,26 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pyflakes (F) + pycodestyle errors (E4/E7/E9): real defects — undefined names,
+# unused imports, syntax-level mistakes — without style churn.
+select = ["E4", "E7", "E9", "F"]
+# Codebase-deliberate styles, exempted: single-line guards (E701/E702),
+# short lambdas (E731), single-letter names (E741), f-string constants (F541).
+ignore = ["E701", "E702", "E731", "E741", "F541"]
+
+[tool.ruff.lint.per-file-ignores]
+# proof/ scripts mutate sys.path before importing repo modules.
+"proof/*" = ["E402"]
+
+[tool.coverage.run]
+source = ["hpaanalyzer"]
+branch = true
+
+[tool.coverage.report]
+show_missing = false
+skip_covered = true
+# Suite measures 89% today; gate a few points below so the hook blocks
+# regressions without failing on noise.
+fail_under = 85

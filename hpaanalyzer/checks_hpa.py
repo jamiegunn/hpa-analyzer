@@ -4,14 +4,14 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .helmyaml import enclosing_conditions, line_of, values_lookup
-from .kube import (REPLICA_MANAGED_KINDS, SCALABLE_KINDS, UNSCALABLE_KINDS,
+from .kube import (REPLICA_MANAGED_KINDS, UNSCALABLE_KINDS,
                    as_int, containers,
                    container_jvm_env_flags, doc_name,
                    helper_resources_ref, is_jvm_image, scale_candidates,
                    scale_class)
 from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
                      ManifestDoc, Severity)
-from .quantity import parse_cpu, parse_memory, fmt_millicores
+from .quantity import parse_cpu, parse_memory
 
 _REPLICAS_LINE_RE = r"^\s{0,4}replicas\s*:"
 

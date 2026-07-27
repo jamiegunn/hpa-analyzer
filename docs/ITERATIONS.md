@@ -4145,3 +4145,77 @@ kind, and as an explicit set difference where it must. One of them is a control
 that proves the tokenizer in the test above it can still see a real regression.
 
 529 tests pass. All 32 proof scripts exit 0. `proof/p11_docsite.py` green.
+
+## R19 — Four tests failed because the world upgraded, and three of them were supposed to
+
+### The failure was the mechanism working
+
+A machine this project develops on moved from helm 3 to helm 4 (v4.2.1, via a
+Rancher Desktop update — nobody chose it as an act of chart analysis), and the
+suite went red in exactly one place: `TestAgainstRealHelm`, the class whose
+docstring says *"these are deliberately assertions about HELM, not about this
+tool. If a future helm changes any of them … the failure should land here
+rather than in a report a user is reading."* It did. Three pinned helm-3
+behaviours stopped being true, and the right response to a pin doing its job
+is to re-measure, not to reach for an older binary until the light turns
+green.
+
+The fourth failure was a stowaway: the kubeconform cross-check test asserted
+the "chart could not be rendered" skip reason on a machine with no
+kubeconform, where the correct and actual summary is "not installed" — a
+missing `skipUnless` guard, unrelated to helm, exposed by the same run. It now
+guards, like its siblings.
+
+### What the re-measurement said
+
+Probed against helm v4.2.1 the same way R4 probed v3.16, same probe chart,
+same three `--kube-version` values:
+
+* **The compiled-in default kube-version moved from v1.20.0 to v1.36.0** — and
+  it is not a constant of helm 4 either; it tracks the vendored client-go and
+  moves with every feature release. R4's failure mode 1 (modern chart, floor
+  above 1.20, refused outright) largely vanishes; the same enforcement now
+  refuses *legacy* charts instead (ceiling below the default), and failure
+  mode 2 — a silent render for a cluster the user does not have — survives
+  with the sign flipped: too new instead of too old.
+* **`.Capabilities.APIVersions` is still compiled in, still identical at every
+  `--kube-version`, still matches no real cluster.** helm 4 swapped the set
+  (`autoscaling/v2beta1` now false everywhere, including at 1.16–1.24 where
+  every real cluster had it; `policy/v1beta1` still true at 1.32, seven minors
+  after removal) — the impossibility relocated, not repaired. `--api-versions`
+  still only appends. CH016's withholding stands unchanged, which is why it
+  was written as a withhold and not as a version table.
+
+### The fix measures instead of tabling
+
+A per-helm-version table of defaults would rot on the next helm release, so
+`helmrender.helm_default_kube_version()` renders a one-ConfigMap probe chart
+with no `--kube-version` and reads `.Capabilities.KubeVersion.Version` out of
+the installed binary — one subprocess, cached per binary path. Discovery
+stores it as `ctx.helm_default_version` and threads it through
+`renderplan.plan()`, and every sentence that used to assert "helm used its
+compiled-in default of v1.20.0" — the render-mode paragraph, the refusal
+advice, CH016's "at" label, the `--kube-version` help text — now names the
+measured value, or, when there was no binary to measure, says "v1.20.0 on
+helm 3, newer on helm 4" instead of asserting helm 3 for everyone. CH016's
+impossible-at-this-version claim is withheld entirely when the in-force
+version could not be measured: an OBSERVED sentence may not rest on an
+ASSUMED number.
+
+`TestAgainstRealHelm` now pins per major: the invariants (KubeVersion tracks
+the flag; APIVersions does not; CRDs read absent; refusal errors are
+multi-line) run against whichever binary is installed, and the per-major
+constants skip visibly on the other major. An unrecognized future major fails
+the APIVersions pin with instructions to measure and pin, not silently.
+
+### Verification
+
+`tests/test_renderplan.py` — per-major pins plus
+`test_measured_default_matches_what_helm_actually_renders_for`, which checks
+the probe against an independent render of the same binary. 533 tests pass
+under helm 4.2.1 with the helm-3 pins skipped. The helm-3 pins themselves are
+R4's assertions carried verbatim under a skip guard — measured when they were
+written, but NOT re-executed in this round, because no helm 3 binary was on
+the machine to run them; a CI leg with helm 3 pinned would close that, and
+does not exist yet. The pre-commit gate (ruff, unit tests under coverage,
+fail-under 85%) is green.

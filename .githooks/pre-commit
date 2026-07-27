@@ -1,0 +1,31 @@
+#!/bin/sh
+# Pre-commit gate: ruff (static analysis) + unit tests under coverage.
+# Enable with:  git config core.hooksPath .githooks
+# Bypass once:  git commit --no-verify
+set -e
+
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -x .venv/bin/python ]; then
+    PY=.venv/bin/python
+else
+    PY=python3
+fi
+
+if ! $PY -c "import ruff, coverage" 2>/dev/null; then
+    echo "pre-commit: dev tools missing. Run:" >&2
+    echo "  python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt" >&2
+    exit 1
+fi
+
+echo "pre-commit: ruff check"
+$PY -m ruff check .
+
+echo "pre-commit: unit tests (under coverage)"
+$PY -m coverage run -m unittest discover -s tests -t . --quiet
+
+echo "pre-commit: coverage gate (fail_under in pyproject.toml)"
+$PY -m coverage report --format=total | { read -r pct; echo "total coverage: ${pct}%"; }
+$PY -m coverage report >/dev/null
+
+echo "pre-commit: all checks passed"

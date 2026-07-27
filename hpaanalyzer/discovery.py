@@ -18,8 +18,8 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 
 from .dockerparse import parse_dockerfile, referenced_script_paths
-from .helmrender import (find_helm, render_chart, rendered_object_ids,
-                         split_rendered)
+from .helmrender import (find_helm, helm_default_kube_version, render_chart,
+                         rendered_object_ids, split_rendered)
 from .renderplan import plan
 from .helmyaml import (deep_merge, load_yaml_docs, resolve_markers,
                        scrub_template)
@@ -129,7 +129,6 @@ def discover(target: str, helm_mode: str = "auto",
         values_paths = [p for p in values_paths if under(p)]
         dockerfile_paths = [p for p in dockerfile_paths if under(p)]
         template_paths = [p for p in template_paths if under(p)]
-        chosen_rel = _rel(ctx.root, chart_dir)
         for d in sorted(set(chart_dirs)):
             if d == chart_dir:
                 continue
@@ -492,13 +491,18 @@ def _load_templates(ctx: ChartContext, template_paths: List[str],
     ctx.helm_present = bool(find_helm())
 
     if use_helm and helm_bin:
-        # R4: decide which cluster helm should render FOR before rendering.
-        # Left to helm, the answer is the v1.20.0 constant compiled into
-        # pkg/chartutil/capabilities.go, which either refuses the chart
-        # outright or silently evaluates .Capabilities for a cluster that
-        # went end-of-life in 2022. renderplan.plan() reads the chart's own
-        # declared range - already parsed in R3 - and picks on purpose.
-        rp = plan((ctx.chart or {}).get("kubeVersion"), ctx.kube_version_override)
+        # R4/R19: decide which cluster helm should render FOR before
+        # rendering. Left to helm, the answer is a constant compiled into the
+        # binary - v1.20.0 on helm 3 (pkg/chartutil/capabilities.go), v1.36.0
+        # on helm 4.2, drifting with every helm release - which either
+        # refuses the chart outright or silently evaluates .Capabilities for
+        # a cluster the user does not have. The constant is a fact about the
+        # BINARY, so it is measured from it (one cached probe render) rather
+        # than tabled; renderplan.plan() reads the chart's own declared range
+        # - already parsed in R3 - and picks on purpose.
+        ctx.helm_default_version = helm_default_kube_version(helm_bin)
+        rp = plan((ctx.chart or {}).get("kubeVersion"), ctx.kube_version_override,
+                  helm_default_version=ctx.helm_default_version)
         ctx.render_kube_version = rp.version
         ctx.render_version_source = rp.source
         ctx.render_version_reason = rp.reason

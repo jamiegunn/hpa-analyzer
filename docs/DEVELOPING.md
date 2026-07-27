@@ -18,6 +18,15 @@ the wording of at least one finding. Both runs are honest. Neither is
 comparable to the other, and `proof/p10_harness.py` demonstrates the whole
 list as a diff rather than asserting it.
 
+Since R19 it is also a function of *which* helm: helm 3 and helm 4 compile in
+different default kube-versions (1.20 vs 1.36-era, drifting per release) and
+different `APIVersions` sets, so the analyzer measures the installed binary's
+default (`helmrender.helm_default_kube_version`) instead of assuming a
+constant, and `tests/test_renderplan.py` pins helm behaviour **per major** —
+the pins for the major you do not have skip, visibly, rather than fail. If a
+helm 5 changes the answers again, the failure lands in `TestAgainstRealHelm`
+with instructions to re-measure, which is that class's entire job.
+
 The container image exists to close that: four pinned binaries — helm,
 kubeconform, kube-score, polaris — one build, the same report on every
 machine. While the native command remained equally documented, the image was

@@ -1,7 +1,6 @@
 """Checks: Helm chart structure, Chart.yaml hygiene, values files, templates."""
 
 import re
-from typing import Any
 
 from . import kubeversion as kv
 from .helmyaml import line_of, values_lookup
@@ -12,11 +11,12 @@ from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
 
 _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.\-]+)?(\+[0-9A-Za-z.\-]+)?$")
 
-# helm's compiled-in default and the capability-gate detector both live in
-# renderplan, next to the source quotations that justify them, so the rule and
-# its explanation cannot drift apart.
-from .renderplan import (HELM_DEFAULT_MINOR as _HELM_DEFAULT_MINOR,  # noqa: E402
-                         capability_gates)
+# The capability-gate detector lives in renderplan, next to the source
+# quotations that justify it, so the rule and its explanation cannot drift
+# apart. (helm's default kube-version is no longer imported here: it depends
+# on the installed binary - 1.20 on helm 3, newer on helm 4 - and is measured
+# into ctx.helm_default_version rather than assumed from a constant.)
+from .renderplan import capability_gates  # noqa: E402
 
 
 def run(ctx: ChartContext, result: AnalysisResult) -> None:
@@ -180,18 +180,27 @@ def _api_version_gate(ctx, result):
 
     That is every group/version compiled into the helm binary's vendored
     client-go. It is not a function of --kube-version and it is not a function
-    of any cluster. Probed against helm v3.16 at three versions:
+    of any cluster. Probed against helm v3.16 and again against helm v4.2 at
+    three versions:
 
-        APIVersions.Has "autoscaling/v2"       true at 1.16, 1.21 and 1.32
-        APIVersions.Has "autoscaling/v2beta1"  true at 1.16, 1.21 and 1.32
+        helm 3.16: APIVersions.Has "autoscaling/v2"       true  at 1.16-1.32
+                   APIVersions.Has "autoscaling/v2beta1"  true  at 1.16-1.32
+        helm 4.2:  APIVersions.Has "autoscaling/v2"       true  at 1.16-1.32
+                   APIVersions.Has "autoscaling/v2beta1"  false at 1.16-1.32
+                   APIVersions.Has "policy/v1beta1"       true  at 1.16-1.32
 
-    autoscaling/v2 first exists in 1.23; v2beta1 was removed in 1.26. No
-    cluster has ever had both. So the set describes an impossible cluster, and
-    it fails in BOTH directions: a built-in group answers true on clusters
-    that never had it, and a CRD group answers false on clusters that do have
-    it, because CRDs are not compiled into helm. And `--api-versions` only
-    APPENDS (pkg/action/install.go), so there is no invocation that removes an
-    entry and no way for any caller to correct either error.
+    autoscaling/v2 first exists in 1.23; v2beta1 was removed in 1.25;
+    policy/v1beta1 was removed in 1.25. Each binary's set describes an
+    impossible cluster - helm 3 answers true for groups a 1.16 cluster never
+    had, helm 4 answers false for v2beta1 on the 1.16-1.24 clusters that DID
+    have it and true for policy/v1beta1 seven minors after its removal - so
+    upgrading helm moves the impossibility around without removing it. The
+    set also fails in BOTH directions on any binary: a built-in group answers
+    from the compiled-in scheme, and a CRD group answers false on clusters
+    that do have it, because CRDs are not compiled into helm. And
+    `--api-versions` only APPENDS (pkg/action/install.go; re-verified against
+    helm 4.2), so there is no invocation that removes an entry and no way for
+    any caller to correct either error.
 
     What this rule therefore does NOT do is guess which branch is right and
     report it. It reports that the rendered branch is not evidence. Severity
@@ -209,10 +218,19 @@ def _api_version_gate(ctx, result):
     minor = None
     at = ctx.render_kube_version
     if rendered:
-        v = kv.parse_version(at) if at else None
-        minor = (v.major, v.minor) if v else _HELM_DEFAULT_MINOR
-        at = at or f"v{_HELM_DEFAULT_MINOR[0]}.{_HELM_DEFAULT_MINOR[1]}.0 " \
-                   f"(helm's compiled-in default)"
+        # When no --kube-version was passed, the version in force is helm's
+        # compiled-in default, which depends on the installed binary and was
+        # MEASURED into ctx.helm_default_version. If even that measurement is
+        # missing, minor stays None and the impossible-at-this-version claim
+        # below is withheld rather than computed from an assumed constant.
+        src = at or ctx.helm_default_version
+        v = kv.parse_version(src) if src else None
+        minor = (v.major, v.minor) if v else None
+        if not at:
+            at = (f"v{ctx.helm_default_version} (helm's compiled-in default, "
+                  f"measured from the installed binary)"
+                  if ctx.helm_default_version else
+                  "helm's compiled-in default (version not measured)")
 
     files = sorted({p for p, _l, _g in hits})
     gvs = sorted({g for _p, _l, g in hits if g})
@@ -481,7 +499,7 @@ def _values_files(ctx, result):
              fix="Pin an immutable tag (version or git SHA), ideally defaulting "
                  "to .Chart.AppVersion; use digests for maximum reproducibility.")
         found, pp = values_lookup(vals, "image.pullPolicy")
-        if found and str(pp) == "Always" and not (tag in (None, "latest", ""))\
+        if found and str(pp) == "Always" and tag not in (None, "latest", "")\
                 and isinstance(tag, str):
             _add(result, rule_id="VA003", severity=Severity.LOW, category=Category.CHART,
                  title="pullPolicy Always with pinned tag", file=path,

@@ -7,7 +7,7 @@ from typing import List
 
 from . import __version__
 from .kube import dockerfile_jvm_evidence, jvm_evidence
-from .models import AnalysisResult, Basis, Category, ProofTable, Severity
+from .models import AnalysisResult, Basis, Severity
 from .renderplan import capability_gates
 from .scoring import (WEIGHTS, category_scores, coverage, grade, overall_grade,
                       overall_score)
@@ -205,8 +205,10 @@ def render_mode_paragraphs(ctx) -> List[str]:
     "Install helm on PATH and re-run" - which is excellent advice when helm
     is missing and actively misleading when helm is installed, ran, and
     refused the chart because its declared kubeVersion excludes helm's
-    compiled-in v1.20.0 default. That reader installs helm twice and gets the
-    same report, because the thing to fix was never the missing binary.
+    compiled-in default (v1.20.0 on helm 3; a recent release on helm 4 -
+    measured into ctx.helm_default_version). That reader installs helm twice
+    and gets the same report, because the thing to fix was never the missing
+    binary.
     """
     out: List[str] = []
     if ctx.render_mode == "helm":
@@ -222,14 +224,19 @@ def render_mode_paragraphs(ctx) -> List[str]:
                 f"Pass --kube-version to render for the cluster you actually "
                 f"run.")
         else:
+            default = getattr(ctx, "helm_default_version", None)
+            named = (f"its compiled-in default of v{default} (measured from "
+                     f"the installed helm)" if default else
+                     "its compiled-in default (v1.20.0 on helm 3, newer on "
+                     "helm 4; measuring it from this binary failed)")
             out.append(
                 "Mode: `helm template` rendered the chart with its real "
                 "template engine, but NO --kube-version could be derived "
                 f"({ctx.render_version_reason or 'chart declares no kubeVersion'}), "
-                "so helm used its compiled-in default of v1.20.0 - a release "
-                "that reached end of life in February 2022. Any "
-                "`.Capabilities` test in these templates was answered for "
-                "v1.20.0. Pass --kube-version to fix that.")
+                f"so helm used {named} - a constant of the binary, not a "
+                "fact about your cluster. Any `.Capabilities` test in these "
+                "templates was answered for that version. Pass "
+                "--kube-version to fix that.")
         out.append(
             "Templates that do not render with these values were additionally "
             "analyzed statically and are labeled 'conditional' wherever they "
@@ -343,11 +350,17 @@ def _helm_refusal_advice(ctx) -> str:
                 f"note that helm will refuse the real `helm install` for the "
                 f"same reason, so this is not a reporting artefact.")
 
-    return (" The usual cause is that helm defaults to a v1.20.0 cluster "
-            "(pkg/chartutil/capabilities.go) and enforces the chart's own "
-            "kubeVersion against it, so a chart requiring a newer cluster is "
-            "refused even though it is fine. Re-run with `--kube-version` set "
-            "to the version of the cluster you deploy to.")
+    default = getattr(ctx, "helm_default_version", None)
+    cluster = (f"a v{default} cluster (its compiled-in default, measured "
+               f"from the installed binary)" if default else
+               "its compiled-in default cluster (v1.20.0 on helm 3, a recent "
+               "release on helm 4)")
+    return (f" The usual cause is that, given no --kube-version, helm "
+            f"renders for {cluster} and enforces the chart's own kubeVersion "
+            f"against it, so a chart whose declared range excludes that "
+            f"default is refused even though it may be fine on your real "
+            f"cluster. Re-run with `--kube-version` set to the version of "
+            f"the cluster you deploy to.")
 
 
 def stdout_summary(result: AnalysisResult, report_path: str,

@@ -345,7 +345,8 @@ def run_cross_check(chart_dir: Optional[str],
     Cross-checking a different render than the one the report describes
     produces two sets of facts about two different clusters and presents them
     as one - and before R4 that is exactly what happened, because neither
-    render passed --kube-version and both silently used helm's v1.20.0.
+    render passed --kube-version and both silently used helm's compiled-in
+    default (v1.20.0 on the helm 3 binaries of that era).
     """
     results: List[ExternalResult] = []
     helm = find_helm()

@@ -99,8 +99,9 @@ def main(argv=None) -> int:
                            "1.31.0. Passed to `helm template --kube-version`. "
                            "Without it the tool derives one from the chart's "
                            "own kubeVersion; without THAT, helm falls back to "
-                           "its compiled-in v1.20.0, which is EOL and will "
-                           "refuse most modern charts.")
+                           "a version compiled into the binary (v1.20.0 on "
+                           "helm 3, newer on helm 4) that is almost never "
+                           "your cluster - the report names the one used.")
     g_an.add_argument("--assume-java", metavar="VER",
                       help="Java version to assume when the base image tag "
                            "hides it (e.g. 8, 8u151, 11.0.16, 17)")

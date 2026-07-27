@@ -342,6 +342,18 @@ version.
   its score. Note also that this flag asks *you* for something usually sitting
   in your repo (`pom.xml`, `build.gradle`, `.java-version`); reading it instead
   is queued, not done.
+* **helm 3 and helm 4 disagree about what a render with no `--kube-version`
+  means — the tool measures your binary instead of guessing.** helm 3
+  renders for a compiled-in v1.20.0 cluster; helm 4.2 for v1.36.0, and that
+  constant moves with every helm release. Since *R19* the analyzer probes the
+  installed binary for its actual default (one cached render) and every
+  "helm used its compiled-in default of vX" sentence in the report names the
+  measured value, so both majors are supported and neither is silently
+  assumed. What did NOT change between majors, re-measured rather than
+  hoped: `.Capabilities.APIVersions` is still compiled into the binary,
+  identical at every `--kube-version`, matching no real cluster — helm 4
+  only swapped which impossible cluster it describes — so CH016 withholds
+  the same confidence under both.
 * **Running it in the container makes the answer reproducible, not correct.**
   The image pins helm 3.16.4 and three validators; if your cluster runs a
   different Helm, the pinned render is reproducibly the wrong one and the tool
@@ -638,6 +650,19 @@ wrong when adding a check.
 python3 -m unittest discover -s tests -t .     # 516 tests
 python3 proof/p5_grade.py                      # each proof/p*.py exits 0 or explains why not
 ```
+
+Lint and coverage tooling lives in `requirements-dev.txt` (ruff + coverage.py,
+both configured in `pyproject.toml`). A pre-commit hook runs ruff, the full
+unit-test suite under coverage, and a `fail_under` coverage gate. One-time
+setup:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+git config core.hooksPath .githooks           # enables .githooks/pre-commit
+```
+
+`git commit --no-verify` bypasses the gate for a single commit.
 
 `-t .` is not optional: `discover -s tests` on its own loads the test modules
 as top-level names, and the nine that use `from .util import …` then fail with

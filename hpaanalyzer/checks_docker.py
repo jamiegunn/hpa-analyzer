@@ -437,7 +437,6 @@ def _jvm_flags(ctx, result, df: Optional[DockerfileInfo], eff: List[str],
     raw = df.jvm_flags if df is not None else []
     path = df.path if df is not None else file
     xmx = parse_jvm_size(flag_val(eff, "Xmx") or "")
-    xms = parse_jvm_size(flag_val(eff, "Xms") or "")
     maxram_pct = flag_val(eff, "MaxRAMPercentage")
     maxram_frac = flag_val(eff, "MaxRAMFraction")
     major = (df.java_major or 0) if df is not None else 0

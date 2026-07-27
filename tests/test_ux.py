@@ -1,6 +1,5 @@
 """UX surface: terminal-first summary, verbosity levels, collapse, HTML."""
 
-import json
 import os
 import tempfile
 import unittest

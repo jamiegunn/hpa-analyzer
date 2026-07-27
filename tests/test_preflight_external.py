@@ -222,10 +222,15 @@ class TestExternalCrossCheck(unittest.TestCase):
         self.assertEqual(kc.verdict, "not run")
 
     @unittest.skipUnless(shutil.which("helm"), "helm not installed")
+    @unittest.skipUnless(shutil.which("kubeconform"), "kubeconform not installed")
     def test_unrenderable_chart_does_not_advise_installing_helm(self):
         """D2: helm is present and REFUSED the chart. The skip reason must say
         so; advising an install sends the reader to do the one thing that
-        cannot possibly help."""
+        cannot possibly help.
+
+        Needs kubeconform genuinely installed: an absent binary reports 'not
+        installed' before the render outcome is even consulted, which is
+        correct - and is not the branch under test."""
         path = self._path_with("helm", "kubeconform")
         with mock.patch.dict(os.environ, {"PATH": path}):
             # deliberately render at a version the chart excludes

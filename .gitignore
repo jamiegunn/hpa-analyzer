@@ -16,3 +16,7 @@ hpa_analysis_report.txt
 
 # Internal adversarial-review materials — NOT for publication
 trial/
+
+# Lint/coverage tool caches
+.coverage
+.ruff_cache/

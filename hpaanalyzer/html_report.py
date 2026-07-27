@@ -9,7 +9,7 @@ read 1000 lines top to bottom.
 
 import html
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 from . import __version__
 from .clusterprobes import build_probes

@@ -241,7 +241,6 @@ def build_probes(result: AnalysisResult) -> List[ClusterProbe]:
     # does with the limit.
     jvm_ev = jvm_evidence(ctx)
     if jvm_ev or (ids & {"JV010", "JV011", "JV013", "JV021", "XF001", "XF002", "XF003"}):
-        pod_sel = sel_arg or " <pod>"
         example_pod = (f"$(kubectl get pod -n {NS}{sel_arg} "
                        f"-o name | head -1)" if sel else f"{REL}-<pod>")
         probes.append(ClusterProbe(

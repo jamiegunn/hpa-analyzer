@@ -8,7 +8,7 @@ import math
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from .dockerparse import effective_flags, flag_val, has_flag
-from .kube import (REPLICA_MANAGED_KINDS, SIDECAR_NAMES, UNSCALABLE_KINDS,
+from .kube import (REPLICA_MANAGED_KINDS, UNSCALABLE_KINDS,
                    as_int, containers,
                    container_jvm_env_flags,
                    container_jvm_env_flag_source, container_jvm_evidence,
@@ -902,7 +902,6 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
         return "; ".join(parts) if parts else None
 
     comps = _components(ctx, xss, xmx, maxdirect, c)
-    stacks = _stacks(comps).point
     nonheap = _nonheap(comps)
     budget_state = ""       # "over" | "fits" | "undetermined"; "" = no limit
     if heap is not None:

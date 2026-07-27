@@ -13,10 +13,15 @@ import unittest
 from hpaanalyzer import kubeversion as kv
 from hpaanalyzer import renderplan as rp
 from hpaanalyzer.engine import analyze
-from hpaanalyzer.helmrender import rendered_object_ids, render_chart
+from hpaanalyzer.helmrender import (helm_default_kube_version, helm_major,
+                                    rendered_object_ids, render_chart)
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
 HELM = shutil.which("helm")
+# Behaviors that changed between helm majors are pinned per major and skip on
+# the other, so the suite documents BOTH realities instead of neither. helm 3
+# rows were measured against v3.16; helm 4 rows against v4.2.
+HELM_MAJOR = helm_major() if HELM else None
 
 
 def _ids(result, rule_id):
@@ -77,9 +82,25 @@ class TestPlanPolicy(unittest.TestCase):
         p = rp.plan(None)
         self.assertIsNone(p.version)
         self.assertEqual(p.source, "undeclared")
+        # with no measured default, the reason must not assert helm 3's
+        # constant for every binary - it names it per major instead
         self.assertIn("1.20.0", p.reason)
+        self.assertIn("helm 3", p.reason)
         # and the report must be able to name what helm will silently use
         self.assertEqual(p.effective_minor, rp.HELM_DEFAULT_MINOR)
+
+    def test_undeclared_names_the_measured_default_when_it_has_one(self):
+        """The in-force version is a fact about the installed binary (1.20 on
+        helm 3, 1.36-era on helm 4), so when discovery measured it, the plan
+        must say THAT version - and effective_minor must follow the
+        measurement, not helm 3's constant."""
+        p = rp.plan(None, helm_default_version="1.36.0")
+        self.assertIsNone(p.version)
+        self.assertEqual(p.source, "undeclared")
+        self.assertIn("1.36.0", p.reason)
+        self.assertIn("measured", p.reason)
+        self.assertNotIn("1.20.0", p.reason)
+        self.assertEqual(p.effective_minor, (1, 36))
 
     def test_unparseable_range_renders_at_nothing(self):
         p = rp.plan(">=v1.2x")
@@ -140,10 +161,20 @@ class TestAgainstRealHelm(unittest.TestCase):
     These are deliberately assertions about HELM, not about this tool. If a
     future helm changes any of them, this tool's reasoning changes with it and
     the failure should land here rather than in a report a user is reading.
+    That is not hypothetical: helm 4 changed the compiled-in default
+    kube-version (1.20 -> 1.36-era, drifting per release) and swapped the
+    compiled-in APIVersions set, and this class caught both. Behaviors that
+    differ between majors are asserted per major below; the invariants that
+    survived the major bump (KubeVersion tracks --kube-version, APIVersions
+    does NOT, CRDs read absent, refusal errors are multi-line) are asserted
+    for whichever binary is installed.
     """
 
     def _caps(self, kube_version):
-        """Render a probe chart that prints what helm believes."""
+        """Render a probe chart that prints what helm believes.
+
+        kube_version=None probes what helm believes with NO --kube-version -
+        i.e. its compiled-in default capabilities."""
         import tempfile
         d = tempfile.mkdtemp(prefix="hpa-caps-")
         os.makedirs(os.path.join(d, "templates"))
@@ -156,27 +187,59 @@ class TestAgainstRealHelm(unittest.TestCase):
                 '  kubeVersion: {{ .Capabilities.KubeVersion.Version | quote }}\n'
                 '  v2: {{ .Capabilities.APIVersions.Has "autoscaling/v2" | quote }}\n'
                 '  v2beta1: {{ .Capabilities.APIVersions.Has "autoscaling/v2beta1" | quote }}\n'
+                '  policyv1beta1: {{ .Capabilities.APIVersions.Has "policy/v1beta1" | quote }}\n'
                 '  crd: {{ .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" | quote }}\n')
         out, err = render_chart(d, kube_version=kube_version)
         self.assertIsNone(err, err)
         import yaml
         return yaml.safe_load(out)["data"]
 
+    def _refusing_chart(self):
+        """A chart whose kubeVersion floor is above ANY binary's compiled-in
+        default, so `helm template` without --kube-version refuses it under
+        helm 3 (default 1.20) and helm 4 (default 1.36-era) alike."""
+        import tempfile
+        d = tempfile.mkdtemp(prefix="hpa-refuse-")
+        os.makedirs(os.path.join(d, "templates"))
+        with open(os.path.join(d, "Chart.yaml"), "w") as f:
+            f.write("apiVersion: v2\nname: refuse\nversion: 1.0.0\n"
+                    'kubeVersion: ">=1.99.0-0"\n')
+        with open(os.path.join(d, "templates", "cm.yaml"), "w") as f:
+            f.write("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+        return d
+
     def test_kube_version_controls_KubeVersion(self):
         for v in ("1.16.0", "1.21.0", "1.32.0"):
             self.assertEqual(self._caps(v)["kubeVersion"], "v" + v)
 
     def test_kube_version_does_NOT_control_APIVersions(self):
-        """The assumption R4 falsified, pinned so it cannot be re-made.
+        """The assumption R4 falsified, pinned so it cannot be re-made - and
+        re-measured for helm 4, which changed the constant without fixing the
+        defect.
 
-        autoscaling/v2 arrived in 1.23 and v2beta1 was removed in 1.26; helm
-        answers true for both at every version, so its APIVersions set
-        describes a cluster that has never existed.
+        The invariant, any major: the APIVersions answers are IDENTICAL at
+        every --kube-version, because the set is compiled into the binary.
+        The per-major pins show each binary's set matching no real cluster:
+        helm 3 answers true for autoscaling/v2 at 1.16 (it first exists in
+        1.23); helm 4 answers false for v2beta1 at 1.16-1.24 where every real
+        cluster had it, and true for policy/v1beta1 at 1.32, seven minors
+        after its removal in 1.25.
         """
-        for v in ("1.16.0", "1.21.0", "1.32.0"):
-            caps = self._caps(v)
-            self.assertEqual(caps["v2"], "true", f"at {v}")
-            self.assertEqual(caps["v2beta1"], "true", f"at {v}")
+        caps = {v: self._caps(v) for v in ("1.16.0", "1.21.0", "1.32.0")}
+        answers = {(c["v2"], c["v2beta1"], c["policyv1beta1"])
+                   for c in caps.values()}
+        self.assertEqual(len(answers), 1,
+                         f"APIVersions varied with --kube-version: {caps}")
+        v2, v2beta1, policyv1beta1 = answers.pop()
+        self.assertEqual(v2, "true")
+        self.assertEqual(policyv1beta1, "true")
+        if HELM_MAJOR == 3:
+            self.assertEqual(v2beta1, "true")     # impossible: v2 AND v2beta1 at 1.16
+        elif HELM_MAJOR is not None and HELM_MAJOR >= 4:
+            self.assertEqual(v2beta1, "false")    # impossible: no v2beta1 at 1.16
+        else:
+            self.fail(f"unrecognized helm major {HELM_MAJOR!r} - measure its "
+                      f"APIVersions set and pin it here")
 
     def test_APIVersions_is_false_for_CRDs_at_every_version(self):
         """The same defect in the other direction: a group that IS on the
@@ -185,9 +248,10 @@ class TestAgainstRealHelm(unittest.TestCase):
         for v in ("1.21.0", "1.32.0"):
             self.assertEqual(self._caps(v)["crd"], "false", f"at {v}")
 
-    def test_helm_refuses_a_modern_chart_without_kube_version(self):
-        """D1: the whole rendered-truth path, dead on arrival for any chart
-        with a floor above helm's compiled-in v1.20.0."""
+    @unittest.skipUnless(HELM_MAJOR == 3, "pins helm 3's v1.20.0 default")
+    def test_helm3_refuses_a_modern_chart_without_kube_version(self):
+        """D1 under helm 3: the whole rendered-truth path, dead on arrival
+        for any chart with a floor above the compiled-in v1.20.0."""
         chart = os.path.join(FIXTURES, "good-chart")
         out, err = render_chart(chart)            # no --kube-version
         self.assertIsNone(out)
@@ -196,10 +260,45 @@ class TestAgainstRealHelm(unittest.TestCase):
         self.assertIsNone(err2, err2)
         self.assertTrue(out2.strip())
 
+    @unittest.skipUnless(HELM_MAJOR is not None and HELM_MAJOR >= 4,
+                         "pins helm 4's recent default")
+    def test_helm4_renders_a_modern_chart_without_kube_version(self):
+        """The same run under helm 4 SUCCEEDS - the default moved above the
+        chart's floor - which is not a fix but the same defect relocated:
+        the render is silently for the default cluster, not the user's.
+        The measured default is what admitted it."""
+        chart = os.path.join(FIXTURES, "good-chart")   # floor >=1.23.0-0
+        out, err = render_chart(chart)            # no --kube-version
+        self.assertIsNone(err, err)
+        self.assertTrue(out.strip())
+        d = helm_default_kube_version()
+        self.assertIsNotNone(d)
+        v = kv.parse_version(d)
+        self.assertGreaterEqual((v.major, v.minor), (1, 23))
+
+    def test_refusal_survives_any_major_when_the_floor_is_above_the_default(self):
+        """helm 4 did not stop enforcing chart kubeVersion against its
+        default - it only raised the default. A floor above ANY shipped
+        default is still refused without --kube-version, on both majors."""
+        out, err = render_chart(self._refusing_chart())
+        self.assertIsNone(out)
+        self.assertIn("kubeVersion", err)
+
+    def test_measured_default_matches_what_helm_actually_renders_for(self):
+        """helm_default_kube_version() is the OBSERVED basis every 'helm used
+        its compiled-in default of vX' sentence rests on. Check it against an
+        independent probe of the same binary."""
+        d = helm_default_kube_version()
+        self.assertIsNotNone(d)
+        self.assertRegex(d, r"^\d+\.\d+\.\d+$")
+        self.assertEqual("v" + d, self._caps(None)["kubeVersion"])
+
     def test_error_text_is_single_line(self):
         """D5: this string lands in single-line report fields and table cells.
-        helm's real error is multi-line ('Error: ...\\n\\nUse --debug ...')."""
-        _out, err = render_chart(os.path.join(FIXTURES, "good-chart"))
+        helm's real error is multi-line ('Error: ...\\n\\nUse --debug ...') on
+        both majors - probed against a chart both majors refuse."""
+        _out, err = render_chart(self._refusing_chart())
+        self.assertIsNotNone(err)
         self.assertNotIn("\n", err)
 
 

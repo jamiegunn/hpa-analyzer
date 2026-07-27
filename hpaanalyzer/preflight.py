@@ -7,7 +7,7 @@ Nothing here executes anything or touches a cluster.
 """
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from .kube import dockerfile_jvm_evidence, jvm_evidence
 from .models import ChartContext
@@ -79,8 +79,6 @@ def build_preflight(ctx: ChartContext) -> Preflight:
             "checks run against empty configuration."))
 
     # --- templates & workloads -------------------------------------------
-    n_tpl = len([t for t in ctx.template_files
-                 if not t.endswith((".tpl",)) and "NOTES" not in t])
     if getattr(ctx, "templates_present", bool(ctx.template_files)):
         items.append(PreflightItem(OK, f"Templates: {len(ctx.template_files)} "
                                        f"file(s) under templates/"))

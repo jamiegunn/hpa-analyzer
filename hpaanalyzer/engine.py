@@ -11,14 +11,14 @@ overlay file.
 
 import copy
 import os
-from typing import List, Optional
+from typing import Optional
 
 from . import (checks_chart, checks_docker, checks_hpa, checks_workload,
                proofs)
 from .discovery import discover, helm_parse_output, scrub_parse_templates
 from .helmrender import render_chart
 from .helmyaml import deep_merge
-from .models import AnalysisResult, ChartContext, Finding
+from .models import AnalysisResult, ChartContext
 
 
 def analyze(target: str, helm_mode: str = "auto",
