@@ -78,6 +78,8 @@ import tempfile
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nativeoverride  # noqa: F401,E402  (sets HPA_ANALYZER_ALLOW_NATIVE - see the module for why)
 HARNESS = os.path.join(REPO, "bin", "hpa-analyzer")
 IMAGE = os.environ.get("HPA_PROOF_IMAGE", "hpa-analyzer-standin:latest")
 CHART = os.path.join(REPO, "fixtures", "bad-chart")

@@ -2541,7 +2541,10 @@ decision. That is strictly better and it is not the same as being correct.
 `container`, `reference`, `limits`) served by GitHub Pages from `main` /
 `/docs`, with a `.nojekyll` file so the HTML is served verbatim and no build
 step stands between the repository and the page. Nothing in `hpaanalyzer/`
-changed, so this is recorded here rather than numbered as R12.
+changed, so it is recorded here without a number of its own. (An earlier
+version of this sentence said "rather than numbered as R12", written when R12
+did not exist yet. It does now — it is the container-only round below — so the
+sentence has been corrected to claim nothing about a number it does not own.)
 
 It is listed in this log for one reason. A documentation site is a set of
 claims about a program, and claims decay silently: a flag gets renamed, an
@@ -2607,3 +2610,1538 @@ figures, without `helm` it checks the static-mode figures the site publishes
 for that case — so both hosts have something that can fail. 172 checks pass
 here, 160 on the machine without the four external validators, and the twelve
 that differ are the ones those validators gate.
+
+---
+
+## R11 — An accusation of absence, made without opening the file
+
+### The defect
+
+Helm charts share blocks through `templates/_helpers.tpl` and pull them in with
+`include`. It is the idiom `helm create` itself generates, and `resources:` is
+one of the most commonly shared blocks:
+
+```yaml
+resources:
+  {{- include "orders.resources" . | nindent 12 }}
+```
+
+Without `helm` on `PATH` this program scrubs Go template actions into markers
+and parses the YAML that is left. `.tpl` files are never parsed as documents on
+that path — `discovery.py` records only that helpers exist — so the block above
+collapses to a single leaf string, `HELMINC@orders.resources`. Three checks read
+that string, found no `requests` key inside it, and said so at the severity of a
+fact:
+
+```
+[RS001] CRITICAL  Container has no resource requests/limits
+[HP022] CRITICAL  HPA scales on CPU but target workload has no CPU request
+[RS011] HIGH      Pod QoS class is BestEffort
+```
+
+and a fourth read `resources: {}` in a values file that no template consumes:
+
+```
+[VA004] HIGH      Empty resources block in values
+```
+
+Every one of those is a claim of **absence**, and not one of them was supported
+by absence. The tool had not opened the file the values live in. The RS001 entry
+carried the line
+
+```
+Basis : OBSERVED - read directly from your files (stated as fact)
+```
+
+which is the one thing it was not. A chart written with a helper was graded four
+findings worse than the byte-for-byte equivalent chart written longhand, and the
+difference was entirely a property of the analyzer's reading, presented as a
+property of the user's chart. R8 built the `Basis` grammar precisely so that a
+guess could not wear the word OBSERVED; this was a guess wearing it.
+
+### The authority
+
+`docs/SPEC.md` §2 and the `Basis` doctrine established in R8. A finding stamped
+OBSERVED asserts that the analyzer read the fact directly. `helmyaml.is_unresolved()`
+is true for two markers that mean opposite things, and the checks fired on the
+union of them:
+
+| Marker | What it means | Is "no resources" true? |
+|---|---|---|
+| `HELMVAL@resources` | `.Values.resources` is unset in every values file read | **Yes.** helm renders an empty block from the same inputs. RS001 is correct and must keep firing at CRITICAL. |
+| `HELMINC@x` | the body is in a file this run did not open | **Unknown.** Nothing is established either way. |
+
+The fix therefore had to be narrower than `is_unresolved`, and deliberately so:
+`kube.helper_resources_ref()` matches `HELMINC@` and nothing else, and tests pin
+that narrowness so that a later "simplification" back to `is_unresolved` breaks
+rather than silently restores the bug.
+
+### The fix
+
+The four accusations are **replaced, not deleted**. Silence would read as a
+pass, and a chart that was never examined is not a chart that came back clean —
+the same rule R8 wrote for the JVM gate. RS018, RS014 and HP032 (INFO) and
+VA011 (LOW) name the helper that was not read, list the verdicts withheld
+because of it, and say how to get them back (install `helm`, or run the
+container, which pins one).
+
+Scoring follows the module's own rule — there is no honest number for "not
+looked at" — and drops RESOURCES from the denominator when **every** container
+is helper-supplied, printing the reason in the coverage table. One legible
+container keeps the category scored, so this does not reintroduce the
+PB004/Dockerfile gate that R8 removed: a category with something real in it
+stays in the mean.
+
+### The proof
+
+`proof/p12_helpers.py`, 7 claims, real subprocesses against the pinned baseline.
+CLAIM 7's control was narrowed during the round: as first written it compared
+against the immediate parent over the whole report, which passed while being
+incapable of failing, because no fixture in the repository produces any of the
+four rules it was watching. It now compares only the four rules it can actually
+observe move. 455 tests pass.
+
+### A number this log promised and then spent elsewhere
+
+R10's queued list opens with "**R11 — `--cross-check` output is not reproducible
+run to run, natively**". That item is still queued and still unfixed; the number
+went to this round instead. It is left standing rather than renumbered, because
+the useful record here is that a queued item was labelled with a round it did
+not get, which is what queues do. The cross-check non-determinism is listed
+again below.
+
+---
+
+## R12 — A reproducibility mechanism nobody was required to use
+
+### The defect
+
+R10 measured that this tool's answer is a function of `PATH`. `p10_harness.py`
+CLAIM 3 diffs the same chart's report with `helm` present and absent and finds
+the `Analysis mode` line, every row of the coverage table, the set of scored
+categories, the denominator, the grade and the wording of HP050 all different.
+Both runs are honest. Neither is comparable to the other.
+
+R10 built a container image to close that — four pinned binaries, one build, the
+same report everywhere. It closed nothing. `python3 -m hpaanalyzer ./svc` stayed
+in the README as an equally valid command, and it is the one people reach for:
+no build, no daemon, no 400 MB pull. The image was optional, so in practice it
+was unused, so the grades stayed incomparable.
+
+That is the defect, and it is not a code defect. **A reproducibility mechanism
+that nobody is required to use is decoration.** Shipping it and then leaving the
+unpinned path in the documentation as a peer is the same as not shipping it,
+with the added cost that the project now believes the problem is solved.
+
+### The authority
+
+The user's instruction, verbatim: "Let's remove any instructions that allow
+someone to use python to run the code on bare metal — let's force them to use
+the docker image." Clarified to *docs plus a guarded runtime*: strip the native
+instructions **and** make the module refuse, because documentation alone is a
+convention and conventions are what the last round already tried.
+
+### The fix
+
+`__main__._require_image()` refuses unless `/etc/hpa-analyzer-image` is present
+(written by the runtime stage of the Dockerfile) or `HPA_ANALYZER_ALLOW_NATIVE=1`
+is set. Five decisions inside that sentence, each of which could have gone the
+other way:
+
+**Exit 2, never 1.** 1 means "your chart failed a gate". A CI job that reads
+"you ran this wrong" as "your chart is bad" has been given a false verdict by a
+tool whose entire purpose is not giving false verdicts.
+
+**No carve-outs for `--help`, `--version` or `--check`.** A carve-out teaches
+that native mode half-works, which is exactly the belief being removed.
+
+**The guard is inside `if __name__ == "__main__"`, so it gates the *command*.**
+`main([...])` in process is untouched: 20 tests and any embedder depend on it,
+and breaking embedders to prevent a mistake embedders are not making is a bad
+trade.
+
+**A file marker, not an environment variable.** One `export` in a shell profile
+would disable an env marker machine-wide and nobody would notice it happen. The
+marker is explicitly **not** a security boundary and `IMAGE_MARKER`'s docstring
+says so — it is aimed at habit, and habit is what the defect is made of.
+
+**The refusal does not print the override.** A bypass shown in every terminal
+becomes the folk-standard invocation within a week. It is documented in
+`docs/DEVELOPING.md` and set by `proof/nativeoverride.py`, which is how the
+evidence layer still spawns the CLI.
+
+Documentation: README install/usage/fixtures blocks, `index.html`, `usage.html`,
+`reference.html`, `container.html` and `DOCKER.md` now teach one command. Where
+the module form survives it is prose explaining the refusal, never a copy-paste
+block — `p11_docsite.py` scans `<pre><code>` specifically and fails on any native
+invocation offered as a thing to run, while leaving the explanations alone.
+`hpa-analyzer.py` is kept as a refusing shim, so an old CI line gets a sentence
+instead of `No such file or directory`.
+
+The Dockerfile's version ARGs moved to global scope in the same commit.
+Redeclared per stage they are invisible to stage 2, and the provenance marker
+would have recorded `helm=` on any build without `--build-arg` while the image
+actually contained 3.16.4 — a provenance record that is blank exactly when it is
+most needed.
+
+### The proof
+
+`proof/p13_guard.py`, 7 claims. CLAIM 6 was first written as a substring test
+over the Dockerfile and **passed on a comment** — the file names the marker path
+in three comments as well as in the `RUN` that creates it — so it now strips
+comment lines before asserting. That is the third time in this log a check has
+passed on something other than the thing it meant to check, which is why the
+convention here is to record it rather than quietly fix it.
+
+455 tests; p10, p11, p12 and p13 all pass.
+
+---
+
+## R13 — A category that cannot deduct, scored 100
+
+### How it was found
+
+Not by reading the code. The user asked for ten to fifteen random charts with
+various Java configurations, run "using just the defaults (cuz that is how most
+people will use this)". `proof/corpus_charts.py` builds fifteen; `proof/p14_corpus.py`
+runs each one through `python3 -m hpaanalyzer <dir>` with no other flags. One row
+of the resulting table did not make sense:
+
+```
+c12-no-mem-limit      B+   88.2   1C 3H 4M 10L
+```
+
+c12's image sets `-XX:MaxRAMPercentage=75` and its pod spec sets no
+`limits.memory` at all. A container-aware JVM with no cgroup memory limit reads
+the **node's** memory as its budget, so that chart asks for 75% of the node's RAM
+in every replica: a 12 GiB heap target per pod on a 16 GiB node, 48 GiB on a
+64 GiB node. It is the most dangerous chart in the corpus. The tool gave it a B+
+and printed this:
+
+```
+| Java / JVM Container Fitness           |  94.0 | A  | 14 |  1M  |
+| Cross-File Consistency (Chart <-> JVM) | 100.0 | A+ | 14 |  -   |
+| Max heap (H)   | UNBOUNDED | no limit and no explicit sizing - unbounded |
+```
+
+### The defect
+
+Four defects, in increasing order of seriousness.
+
+**"no explicit sizing" is false.** The chart sizes the heap explicitly. What the
+tool means is "I could not turn that sizing into a number", and it reports its
+own arithmetic's limit as a property of the user's chart. A reader who acts on
+that sentence sets `-Xmx` and does not set the limit, which is the wrong half.
+
+**The peak-RSS row said "all measured, no estimates"** while every component row
+above it was labelled `(est.)`. The wording is chosen by `banded`, whose comment
+asserts it "is false only when the user has measured EVERY non-heap component".
+That was true when it was written and became false once `total` could be `None`
+— a comment that was correct at the time and was not re-read when the thing it
+described changed.
+
+**Cross-File Consistency scored 100.0 / A+** — fourteen of a hundred weight
+points of clean bill of health. It is not a passing grade, it is an empty
+category. XF001 through XF005 are every rule in it and all five are gated on
+`if lim ...`; with no memory limit the category cannot deduct a single point, by
+construction. `c03` shows the same fault without the first one: `-Xmx512m`, no
+limit, heap therefore known and bounded, and Cross-File Consistency still
+100.0 / A+ over zero findings. **This is the third time this project has shipped
+this exact fault** — PB004/Dockerfile in R8, helper-supplied resources in R11 —
+and `scoring.py`'s own docstring names it: "Score an unassessed category 100:
+invents a clean bill of health for something never looked at."
+
+**No finding at any severity says "you asked for a percentage of a limit you did
+not set."** The tool holds every fact needed; it prints "MaxRAMPercentage is
+computed FROM it" in its own prose, and draws no conclusion.
+
+### The authority
+
+`docs/SPEC.md` §3 (the budget model) for the first two, and `scoring.py`'s own
+forbidden-fabrication list for the third. The fourth is Bar 2: a tool that holds
+the facts and does not reach the conclusion has not done what it is for.
+
+### The fix
+
+XF006 fires when a percentage-based heap sizing meets an absent memory limit,
+and says what will happen rather than what is missing. The budget table stops
+claiming the user failed to size the heap when the truth is that the analyzer
+could not resolve the number, and `banded` no longer promises "all measured"
+once any component is unknown. `proofs.cross_no_limit_reason()` gates the CROSS
+category out of the denominator when no JVM container sets `limits.memory`,
+printing the reason — the same treatment R11 gave RESOURCES.
+
+### The proof
+
+`proof/p15_nolimit.py`, with a negative control for each of the four defects, so
+that a later simplification that reintroduces any of them fails there rather
+than in somebody's cluster. c12 moves from `B+ 88.2` to `C 86.5, 2C` — one new
+critical, and the grade change is R14's, below.
+
+---
+
+## R14 — A report that says the container will be OOM-killed, above the letter B+
+
+### The defect
+
+`c07-xmx-over-limit` sets `-Xmx3g` inside a `limits.memory: 2Gi`. The tool gets
+this completely right. It files XF001 at CRITICAL with basis OBSERVED, and says
+in its own prose that the container will be OOM-killed under first real load.
+Then the front page of that same report said:
+
+```
+  OVERALL QUALITY SCORE :  87.8 / 100   GRADE: B+
+```
+
+Both statements are outputs of the same program about the same chart in the same
+run. One of them says the workload cannot start successfully under load; the
+other is a letter that a reader, a manager, or a CI gate will read as *fine*.
+Whichever one is right, shipping both is the defect — and the letter is the one
+almost everybody reads, because it is the only part of the report small enough
+to quote.
+
+Nothing is wrong with the arithmetic. The score is a weighted mean over ten
+categories. c07 is mediocre-in-nine-and-fatal-in-one, and a weighted mean of
+that really is 87.8. **The mean is behaving correctly and that is precisely the
+problem**: a mean is a summary of a distribution, and a certain failure is not a
+point in a distribution. Dilution across nine healthy categories is exactly the
+mechanism by which one fatal fact disappears.
+
+### The authority
+
+The corpus, run on defaults, which is how the user asked for it to be tested and
+how nearly everybody will use it. `p14_corpus.py`'s CLAIM 3 is where this
+surfaced, and the history of that claim is worth recording because the same
+mistake was made twice:
+
+*First draft:* `spread > 20`. It failed at 19.9. An arbitrary threshold is not a
+claim; it is a number chosen so today's output passes, and the only thing 19.9
+disproved was the 20.
+
+*Second draft:* c01 beats c03 by at least 15 points. A comparison between two
+named charts rather than a threshold on an aggregate, so it was an improvement —
+but it failed at 8.2, and chasing *why* showed the 15 to be as arbitrary as the
+20 had been. It was demanding that the mean stop behaving like a mean.
+
+What the corpus actually exposed was never about gaps between charts. It was
+c07.
+
+### The fix, and the two things it deliberately does not do
+
+`scoring.overall_grade()` caps the **OVERALL grade** at C when the result carries
+any non-ASSUMED CRITICAL. `CRITICAL_GRADE_CAP = "C"`, applied over
+`_GRADE_ORDER`.
+
+**It does not touch the number.** Re-weighting the mean so that a critical drags
+the arithmetic down was considered and rejected: the score is a measurement of
+how many findings of what severity landed in which categories, and bending it so
+the label comes out right would corrupt a measurement to fix a label. The label
+is what is wrong, so the label is what gets corrected. The 87.8 stays, and the
+cap reason says so out loud.
+
+**It does not cap on ASSUMED criticals.** `models.effective_deduction()` already
+limits an ASSUMED finding to `Severity.HIGH.deduction`, on the grounds that the
+tool's own uncertainty must not sink somebody's grade. A cap firing where the
+deduction does not would make one finding weigh two different amounts in two
+places. `c04`'s HP025 is exactly this case — CRITICAL, but ASSUMED because the
+HPA's target was not resolvable by name — and it keeps its A- 90.6.
+
+**Per-category grades stay uncapped.** The cap is a statement about the chart as
+a whole; a category grade is a statement about that category, and capping it
+would blur which category the fatal fact is in.
+
+### The cap is never silent, on any of the four surfaces
+
+A grade a reader cannot reconcile with the number printed beside it is worse
+than the uncapped grade was. So the reason is printed by the text report, the
+HTML report (where the badge colour follows the cap rather than the score, since
+a green badge carrying the letter C is its own contradiction), the stdout
+summary, and `--quiet`. `--quiet` matters most: it is one line, and one line is
+where a silent cap would do the most damage, because it is the line that gets
+pasted into a ticket with nothing around it. It reads `grade C CAPPED`.
+
+The JSON emits `grade` (capped — it is what the reports print and what a CI gate
+will branch on), `grade_uncapped`, and `grade_cap_reason`. A consumer gating on
+an uncapped B+ while the human report said C would be the same lie in a new
+place.
+
+The reason text for c07, measured rather than quoted from a draft:
+
+```
+capped at C from B+: 1 CRITICAL finding (XF001) asserts a failure this chart
+will hit, and a grade above C would contradict it. The 87.8 is unchanged - it is
+a weighted count of findings across 10 scored categories, only 1 of which carries
+a critical, and that dilution is exactly why the mean cannot see this
+```
+
+### A sentence explaining a cap is the last place that can afford an invented number
+
+The first version of that string hardcoded "across ten categories, and nine of
+them being clean". On any chart with an unassessed category that sentence is
+simply false, and c03 and c09 both have one. The counts are now read off the
+result being explained — `cov.n_assessed`, and the number of distinct categories
+actually carrying a hard critical — rather than written into the prose.
+
+### The proof
+
+`proof/p16_gradecap.py`, 8 claims, all passing. The cap fires exactly where a
+non-ASSUMED CRITICAL exists **and** the uncapped band is above C, per chart;
+charts already at or below C report no cap (c02, c11); `good-chart` is untouched
+and its report contains no "capped at" text anywhere; the score is identical in
+the report and the JSON and the reason quotes that same number; the disclosure
+reaches all four surfaces; and no corpus chart shows a grade above the cap while
+asserting a certain failure.
+
+Two things about that script are deliberate. It builds its own
+`assumed_only_chart()` fixture rather than borrowing one from the corpus,
+because every corpus chart that raises an ASSUMED critical also raises an
+observed one, so the corpus cannot isolate the exemption — and **a claim that
+cannot be isolated is a claim that cannot fail**. And its first run produced ten
+failures which were all the *script's* fault: `report.py` wraps at 100 columns,
+so a verbatim substring search for the reason was, in effect, asserting that the
+report does not wrap. That is not the claim and is not even desirable. A
+whitespace-collapsing helper fixed it, and the reasoning lives in that helper's
+docstring so the next person does not "fix" the wrapping instead.
+
+`p14_corpus.py` gained a matching claim in the other direction: a chart whose
+only CRITICAL is a guess keeps its earned grade. The exemption is now asserted
+rather than merely relied upon.
+
+### The corpus, on defaults
+
+```
+c01-temurin21-pct-cpu       A-  92.9   0C 3H 3M 10L   10 categories (100 weight)
+c02-8u131-inert-javaopts     C  73.8   5C 5H 4M 11L   already at C, no cap
+c03-openjdk8-shellcmd        B  84.7   0C 6H 6M  9L   9 of 10 (86 weight)
+c04-17-noflags-memhpa       A-  90.6   1C 2H 5M 11L   HP025 ASSUMED -> not capped
+c05-11-removed-flags         C  87.3   1C 3H 5M 11L   CAPPED from B+ (JV015)
+c06-helper-resources        A-  92.1   0C 3H 4M  9L
+c07-xmx-over-limit           C  87.8   1C 3H 5M  9L   CAPPED from B+ (XF001)
+c08-corporate-base          A-  92.0   0C 2H 6M 10L
+c09-no-dockerfile           A-  92.2   0C 2H 5M 10L   9 of 10 (92 weight)
+c10-statefulset-distroless  A-  92.6   0C 3H 5M  8L
+c11-pct-on-java8             C  75.4   5C 4H 5M 11L   already at C, no cap
+c12-no-mem-limit             C  86.5   2C 3H 4M 10L   CAPPED from B (HP050)
+c13-unsized-sidecar          C  83.8   1C 5H 7M 12L   CAPPED from B (RS001)
+c14-resources-in-overlay     C  80.9   3C 4H 4M 10L   CAPPED from B- (HP022, RS001)
+c15-tiny-heap-big-limit      A  93.7   0C 2H 4M 10L
+```
+
+### The honest loss
+
+The cap is coarse. It says "not above C" and nothing finer; a chart with one
+critical and a chart with five both land at C on the letter, and only the number
+beside it separates them. That is a deliberate trade — the alternative is a
+second scale that would need its own justification — but a reader who wants to
+rank two failing charts must read the score, not the grade, which is the inverse
+of the usual advice.
+
+### Also discovered, queued
+
+* **HPA scores 94.0 / A at weight 15 on charts with no HPA at all.** The
+  category is not empty — HP002 fires and deducts — so R11's and R13's remedy
+  (drop it from the denominator) would delete a real deduction, which is the R8
+  fault pointing the other way. It needs a different answer from the two this
+  project has already used, and it did not get one this round.
+* **AV010, SC001, SC002, PB004 and PB005 fire on nearly every corpus chart**,
+  which makes them close to a constant offset rather than a discriminator. They
+  are true on c01 as well, so part of this is a corpus-design artefact and not a
+  calibration fault; separating the two requires charts written to pass them,
+  which the corpus was not built to do.
+* Everything still queued from R10 and earlier: `--cross-check`
+  non-determinism, the external tools' versions still absent from the report,
+  cluster-facts ingestion, Java version detection from `pom.xml` / `build.gradle`,
+  R9's bands having no confidence axis, `--measured` asking the wrong actor, R7's
+  unmerged subchart values, `_table`'s mid-word breaking, PB003, and
+  `_last_summary_line` being used for helm lint.
+
+---
+
+## R14b — A gate that deleted real deductions, and the check that let it
+
+### The defect
+
+R13 added a coverage gate: if no JVM container sets `limits.memory`, the CROSS
+category cannot deduct, so drop it from the denominator. That is right, and the
+implementation reads only the **base** context.
+
+`engine.analyze()` does not stop at the base context. `_overlay_variants()` runs
+the workload checks, the HPA checks and the proofs against every values overlay
+and merges the new findings back in. `fixtures/bad-chart` sets no memory limit in
+`values.yaml` and a 4 GiB one in `values-prod.yaml`, where XF001 and XF003 both
+fire at CRITICAL.
+
+So the gate declared "not assessable" about a category holding two criticals,
+and removed fourteen weight points of **real deductions** from the denominator
+those points had already been subtracted from. The score of a chart with two
+critical cross-file faults went **up**. This is the R8 fault inverted: not a
+clean category scored 100, but a dirty category scored nothing at all.
+
+It was found by three unit tests failing after R13 and R14 went in — that is,
+by a fixture's score moving for no reason anybody could name, which is exactly
+how the next one will be found if the backstop below is not there.
+
+### The authority
+
+`scoring.py`'s own framing, sharpened. A gate answers "*could* this category
+have deducted?" — a prediction. The findings answer "*did* it?" — a measurement.
+Where they disagree, the measurement wins.
+
+### The fix, in two layers
+
+**The gate learns about overlays.** `proofs._overlay_sets_mem_limit()` scans each
+overlay's raw values for anything shaped like `{"limits": {"memory": ...}}`. It
+is a structural walk rather than a path lookup, because `resources` is not at a
+fixed key — charts nest it under the component name, under `global`, under a
+list of sidecars. Re-rendering each overlay here would duplicate the engine and
+cost a helm invocation per overlay. A false positive only keeps a category *in*
+the score, which is the direction that cannot invent a clean bill of health.
+
+**`coverage()` carries a backstop.** A category that lost points was assessed,
+whatever any gate believes, so no category with a nonzero deduction may be
+dropped from the mean those points were subtracted from. It is a backstop over
+`unassessed_reason()`, not a substitute for it, and it exists because the gates
+keep getting this wrong in one specific direction — three rounds running.
+
+### The disagreement is never silent, and never charged to the user
+
+When the backstop overrides a gate, `_warn_gate_contradiction()` prints to
+stderr, once per distinct contradiction per process, so a sweep over fifteen
+charts does not print the same tool bug fifteen times.
+
+It goes to stderr and it does **not** become a `Finding`. Deducting points from
+somebody's score because the tool contradicted itself would be the tool charging
+the user for its own bug. stderr is visible to whoever runs the tool and invisible
+in the report they hand to somebody else, which is exactly the right audience for
+"hpa-analyzer has an internal inconsistency, please report it".
+
+Silence was the alternative and is worse: a silent backstop papers over gate
+bugs forever, and the next one gets found the way this one did.
+
+### The first draft of the backstop was wrong, in the way this log always records
+
+It keyed on "the category produced a finding". Five more tests broke. DF000 is an
+INFO worth zero points whose entire job is to report that no Dockerfile was
+found — a coverage statement, firing precisely on the charts where DOCKERFILE
+genuinely cannot be assessed. Keying on findings kept DOCKERFILE in the
+denominator at **100.0 / A+ on a chart with no Dockerfile**, which is the exact
+fabrication `scoring.py` forbids, reintroduced by the fix for its inverse.
+
+The invariant is narrower and exactly right: **deducted from**, not "has a
+finding". `f.effective_deduction() > 0`.
+
+### The proof
+
+`tests/test_score_coverage.py` gains `TestGateCannotDeleteDeductions`, three
+tests: bad-chart keeps CROSS because an overlay deducts from it; a gate that
+lies about RESOURCES is overridden *and* announced, with stderr captured and
+asserted to name the rule id; and a zero-point finding does not force a category
+back in, which pins the DF000 mistake so it cannot return as a simplification.
+
+458 tests and 40 subtests pass. All 28 proof scripts, p1 through p16, exit 0
+with no `[FAIL]` line; p14, p15 and p16 each report ALL CLAIMS PASS.
+
+---
+
+## R15 — Six flags the tool accepted and four of them it then ignored
+
+### How it was found
+
+By the only method that has ever worked here: running the thing. The corpus grew
+from fifteen charts to thirty (`proof/corpus_charts.py`), and
+`proof/p17_flagmatrix.py` was written to run all thirty plus both fixtures across
+the whole flag surface — `--kube-version`, `--assume-java`, `--measured`,
+`--values`, `--json`, `--html`, `--quiet`, `--check`, `--cross-check` — and
+compare the outputs to each other rather than to a stored expectation. Comparing
+runs to each other is the part that mattered. Four of the six defects below are
+invisible in any single report, because a single report of a flag that did
+nothing looks exactly like a report of a flag that worked.
+
+### D1 — `--kube-version` never reached the ranking it exists to inform
+
+`c16` and `c17` carry the same deprecated `apiVersion`s. Run at
+`--kube-version 1.20` and at `--kube-version 1.31`, the two runs of c17 were
+byte-identical in outcome:
+
+```
+--kube-version 1.20.0 ->  91.7 / 100  A-   TP010 LOW, TP010 LOW
+--kube-version 1.31.0 ->  91.7 / 100  A-   TP010 LOW, TP010 LOW  ("Nothing breaks today")
+```
+
+`extensions/v1beta1 Ingress` was removed in 1.22. On a 1.31 cluster this chart
+does not install. The tool said "Nothing breaks today" because it ranked the
+finding against the chart's own `kubeVersion: >=1.19.0-0 <1.21.0-0` and never
+looked at the flag — in the same report where helm had *already refused the
+chart* against 1.31 and said so twelve lines further up.
+
+The mistake underneath is a category error about what the two numbers are. A
+chart's `kubeVersion` is a **claim the chart makes about itself**. `--kube-version`
+is a **statement about the world**, made by the person who can see the cluster.
+When they disagree the chart is the thing that is wrong, and the tool was
+resolving the disagreement in favour of the file.
+
+`_Scope` in `checks_chart.py` resolves it the other way and says so rather than
+switching silently:
+
+```
+The chart's own kubeVersion (>=1.19.0-0 <1.21.0-0) does not admit 1.31, so helm
+will refuse to install it there until that constraint is corrected - but the
+constraint is the chart's opinion of your cluster, and you have stated
+otherwise, so this finding is ranked against the cluster.
+```
+
+```
+--kube-version 1.31.0 ->  89.5 / 100  C    TP010 CRITICAL, TP010 CRITICAL
+```
+
+### D2 — `--assume-java` manufactured a JVM
+
+`c24-not-java` is nginx. Run with `--assume-java 17` it moved JAVA and CROSS
+**out** of the unassessed list, filed JV021 and JV026 against nginx, and the
+score went **up**, from 85.4 to 87.8, because two categories full of nothing
+joined the mean at their starting 100.
+
+`--assume-java 17` states a version. It does not state the existence of a
+runtime, and the tool read it as both. `discovery.py` now applies the assumption
+only where a JVM is evidenced — by the Dockerfile, or anywhere in the chart's
+containers — and where it is not, records in coverage why the flag was declined
+rather than obeying it:
+
+```
+--assume-java 17 NOT applied: no JVM is evidenced anywhere in this chart ...
+The flag states a version, not the existence of a runtime - Java checks stay
+unassessed rather than being scored against a JVM that is not there
+```
+
+c24 with the flag is now identical to c24 without it: `85.4 C`, `unassessed =
+['JAVA', 'CROSS']`, zero JV and zero XF findings. This is the R8/R11/R13/R14b
+fault family again, arriving from a new direction: not a gate that scored an
+empty category, but a flag that filled one.
+
+**The first fix was half a fix, and the test found the other half.** The "NOT
+applied, and here is why" note is written by `discovery._load_dockerfiles`,
+which does not run on a chart with no Dockerfile — so a chart whose JVM-ness is
+decided entirely from the pod spec printed `Java / JVM checks: NOT RUN` and said
+*nothing whatever* about the flag the operator had just passed. Silence about a
+discarded input is indistinguishable from having honoured it, which is the
+sentence this whole iteration is about. `ChartContext` now records what the
+operator **typed** separately from what was **applied** — two different facts,
+only one of which was being stored — and `checks_docker._no_jvm_evidence` names
+the declined flag.
+
+### D3 — the HTML headline rounded across a grade boundary
+
+```html
+<div class=grade>A-<span>93/100</span></div>
+```
+
+for a chart the text report scored 92.9. 93 is exactly the A threshold, so the
+first thing a reader saw was a document disagreeing with itself about which
+grade it had just awarded. `{score:.0f}` — and the per-category cells directly
+below that badge had always rendered one decimal, so the rounding was not even
+internally consistent. A grade boundary is a cliff and no display convention
+gets to round a number across one.
+
+### D4 — a workload-kind filter doing coverage's job
+
+`proofs._pairs()` only considered Deployment, StatefulSet and DaemonSet. Any
+chart whose workload is a Job, CronJob or Argo Rollout got no JVM footprint
+proof, no heap-versus-limit arithmetic — and Cross-File Consistency still scored
+100.0 / A+ at fourteen weight points, because a category with no findings looks
+identical to a category with nothing wrong.
+
+```
+c22-cronjob-hpa    A   95.9    Cross-File Consistency | 100.0 | A+ | 14
+                                Scored over all 10 categories (100 of 100 weight)
+```
+
+c22 sets `-Xmx6g` under a `4Gi` limit. It is a guaranteed OOM kill and the tool
+gave it an A.
+
+This is **the fourth time** this project has shipped this exact fault — R8
+(Dockerfile), R11 (helper-supplied resources), R13 (CROSS with no limit), and
+now a kind filter. It keeps arriving because a filter and a gate are the same
+line of code from the inside; the difference is only whether anything downstream
+knows the skip happened. The filter now admits every kind that can carry
+containers, and `c22` grades `C 88.6` with XF001 CRITICAL.
+
+### D5 — `scaleTargetRef.kind` was never compared to anything
+
+c22's HPA targets a `batch/v1` CronJob. A CronJob has no `scale` subresource; the
+controller reports `FailedGetScale` and never scales anything, ever. The tool
+resolved the target **by name**, found it, and printed a full scaling table
+describing behaviour that cannot occur.
+
+The gap was never parsing — HP041 already proves name resolution works, and
+catches c27's case mismatch. The `kind` was simply never looked at. HP042 fires
+CRITICAL for the four kinds that provably cannot scale, and the scaling table
+stops pretending:
+
+```
+[INERT: target CronJob cannot be scaled]
+NONE OF THIS HAPPENS. The scaleTargetRef names a CronJob, which has no `scale`
+subresource, so the controller reports FailedGetScale and never acts on any row
+above (see HP042). The table is retained to show what the declared thresholds
+WOULD have meant, and for no other purpose.
+```
+
+An unrecognised kind still gets no finding. Argo Rollouts, KEDA ScaledObjects and
+any number of CRDs implement `scale` correctly, and withholding a claim never
+becomes asserting one.
+
+### D6 — remediation advice written without reading argv
+
+The helm-refusal paragraph had one canned sentence, and it was wrong in two
+different ways at once. It explained every refusal as a `kubeVersion` problem,
+including c20's, which fails on `image.tag must be set for this chart`. And it
+interpolated the run's own `--kube-version` into its example, so a run invoked
+with `--kube-version 1.31.0` ended by advising its operator to re-run with
+`--kube-version 1.31.0`.
+
+Advice that does not read the arguments it is advising about is not advice. The
+paragraph now branches on the actual helm message and on whether the flag was
+supplied:
+
+```
+That is not a kubeVersion problem - the message above names the actual cause.
+Reproduce it directly with `helm template release-name <chart>` and fix what it
+names; no flag of this analyzer will change it.
+```
+
+### The authority
+
+Bar 2 throughout — a tool that holds the facts and does not reach the conclusion
+has not done what it is for — plus one addition this round makes explicit: **a
+flag the tool accepts is a promise it will act on it.** Accepting `--kube-version`
+and ranking against the file, or accepting `--assume-java` and inventing a
+runtime, is worse than rejecting the flag, because the operator has no way to
+tell from the output that their input was discarded.
+
+### The proof
+
+`proof/p17_flagmatrix.py`: 69 claims over 32 charts and the full flag surface,
+0 failures. Three of those claims were themselves wrong first and are recorded in
+the script rather than quietly repaired — a conflict check that passed because
+the tool echoed the flag back ("a check that passes because the tool repeated my
+own argument to me is not a check"), an advice-loop check that could not match
+because the report hard-wraps at 100 columns and the wrap fell mid-sentence, and
+a coverage claim that demanded a heap finding from a chart that sizes its heap
+correctly.
+
+`proof/p14_corpus.py` was repaired the same way. Its `len(made) == 15` was a check
+testing the author's memory; two more demanded a score line from every report,
+which c21 — an umbrella chart with no renderable workload — correctly declines to
+produce. Demanding a number there would have been demanding the one behaviour
+`scoring.py` exists to forbid. The claims now read "either scores or says NOT
+GRADED, and says why".
+
+`tests/test_r15_flags.py` pins all six as unit tests — eighteen of them, each
+comparing two runs that differ only in the flag, because that is the only shape
+that catches a flag doing nothing. Three are negative controls: no flag still
+believes the chart's `kubeVersion`; `--assume-java` still works where a JVM *is*
+evidenced; and an unrecognised `scaleTargetRef.kind` still gets no finding.
+Writing them found the half-fix recorded under D2 above.
+
+476 tests and 40 subtests pass. All 29 proof scripts exit 0.
+
+## R16 — Fifteen weight points of A+ for a question the tool never asked
+
+### How it was found
+
+Not by reading the code, and not by looking for this. The round opened on a
+different complaint, and one that is still arguable: `Horizontal Pod Autoscaling`
+carries weight 15, and a chart with **no autoscaler at all** scores that category
+94.0, an A, because HP002 is a single MEDIUM. Measured over the thirty-five-chart
+corpus:
+
+```
+100.0  x1   (fixtures/good-chart, and it was written to)
+ 97.0  x12  (HP030 - no behavior block - fires on 25 of the 26 charts with an HPA)
+ 94.0  x6   (every chart with no HPA object at all)
+ 85.0  x2      72.0  x9      41.0  x1      20.0  x1
+```
+
+Absence of the entire feature outranks fourteen of the twenty-six charts that
+implement it. That is a calibration argument, it is arguable in both directions,
+and it was deliberately **not** changed — see "What was left alone" below.
+
+Underneath it was something not arguable. `checks_hpa._no_hpa()` opened:
+
+```python
+scalable = [w for w in workloads
+            if (w.kind or "").lower() in ("deployment", "statefulset")]
+if not scalable:
+    return
+```
+
+A bare `return`: no finding, and — because nothing else in the tool asks the
+question — no coverage note either. `scoring.unassessed_reason()` drops HPA only
+when **no** Kubernetes objects were parsed at all. Objects were parsed. So the
+category counted as assessed, held zero findings, and a category with zero
+findings scores 100.0.
+
+One chart per workload kind, differing only in `kind:`, the apiVersion that kind
+requires, and the spec fields that apiVersion makes mandatory:
+
+```
+kind                    HPA cat   HPA findings   assessed weight
+Deployment                 94.0   ['HP002']              64
+StatefulSet                94.0   ['HP002']              64
+ReplicaSet                100.0   []                     64
+ReplicationController     100.0   []                     64
+DaemonSet                 100.0   []                     64
+CronJob                   100.0   []                     64
+Pod                       100.0   []                     64
+Rollout                   100.0   []                     64
+```
+
+and on six of those eight the scorecard printed:
+
+```
+| Horizontal Pod Autoscaling             | 100.0        | A+    | 15   |
+```
+
+which is the first entry on `scoring.py`'s own list of forbidden fixes, arrived
+at from the other end: *"Score an unassessed category 100: invents a clean bill
+of health for something never looked at."* The tool had been writing the fixes it
+forbids, in the one number people read first, for fifteen rounds.
+
+This is the same fault as R8, R11, R13, R14b and R15's D4 — one `if` deciding
+both which findings to emit **and** whether the category was assessed. Sixth
+instance. That is no longer a bug, it is a shape, and it is the shape to grep for
+in any tool that both scores and explains.
+
+### Three defects, not one, and they need three different fixes
+
+The eight rows above do not all fail for the same reason, and the first draft of
+this round treated them as if they did.
+
+**(a) ReplicaSet, ReplicationController — a copy of a list, and the list rotted.**
+Both implement `/scale`. Both are in `kube.SCALABLE_KINDS`, which is the tool's
+own written statement of exactly that. `_no_hpa()` re-typed two of the four
+inline and dropped the other two. HP002 is precisely the finding for these charts
+and they got silence.
+
+The correction that matters here, because the first fix was not enough:
+swapping in `SCALABLE_KINDS` recovered ReplicaSet and **not**
+ReplicationController.
+
+```
+kind                    HPA findings   HPA score
+ReplicaSet              ['HP002']           94.0
+ReplicationController   []                 100.0
+```
+
+The list `_no_hpa` was handed is `ChartContext.workloads`, whose own literal has
+never mentioned ReplicationController — so the document was filtered out one
+level **above** the bug being fixed, and fixing the copy inside the function
+could not reach it. Two copies of the same wrong list, in series. The input is
+now `kube.scale_candidates(ctx.docs)`, which reads the level below both.
+
+**(b) DaemonSet, Job, CronJob, Pod — the only new idea in the round.** These
+genuinely cannot be autoscaled, and `kube.UNSCALABLE_KINDS` already held a
+written reason for each. Silence on the **findings** axis is correct and always
+was: telling an operator to put an HPA on a DaemonSet is worse than saying
+nothing. Silence on the **scoring** axis is not, because fifteen weighted points
+of A+ were being awarded for it. Filing it as unassessed would also be false —
+the tool was not blind, it read the object and holds the answer.
+
+So there is now a third coverage state, **NOT APPLICABLE**, arithmetically
+identical to NOT ASSESSED (the category leaves the mean, numerator and
+denominator together) and semantically its opposite. The discriminator, written
+into `scoring.not_applicable_reason`:
+
+> Can the tool state, from evidence it HOLDS, that the category's subject cannot
+> exist for this chart? Then NOT APPLICABLE. Did it merely fail to FIND evidence?
+> Then NOT ASSESSED.
+
+The difference is not decorative — it is the difference between an instruction
+and a fact. NOT ASSESSED tells the reader to go find an input. NOT APPLICABLE
+tells them not to bother, and the reason string says so in as many words: *"no
+change to the chart would create one."*
+
+**(c) Rollout — the answer neither of the above supplies.** An Argo `Rollout`
+**does** expose `/scale`, so HP002's subject exists — but this tool's kind lists
+have never heard of it, and concluding "that CRD cannot autoscale" from a set
+that does not mention it invents the answer just as surely as scoring it 100 did.
+What the tool actually has here is ignorance of a specific, nameable kind. That
+is NOT ASSESSED, and the reason string names the kind so the reader can settle it
+in the ten seconds it takes:
+
+```
+this chart deploys no built-in scalable workload, and whether Rollout implements
+the scale subresource is not something this tool knows; it is not scored either
+way
+```
+
+The fact underneath all three was never two-valued. `kube.scale_class` now
+returns `scalable` / `unscalable` / `unknown`, and each of the three routes
+somewhere different.
+
+### The negative control, which is the whole reason condition 1 exists
+
+The failure mode of a fix like this is not that it stops working — it is that it
+starts working everywhere. A predicate keyed on workload kind alone would drop
+HPA from the mean on `c22-cronjob-hpa`, a corpus chart that ships a CronJob
+**and** an HPA pointed at it and deducts a CRITICAL 25 points for it. Dropping a
+category that has just deducted twenty-five points is **the R14b bug, re-committed
+one round after it was fixed**, and the R14b backstop would have caught it and
+printed an internal-inconsistency warning — which is not the same as not writing
+it. Relying on a backstop to cover a bug you can see from where you are standing
+is not engineering.
+
+`not_applicable_reason` therefore refuses to fire at all when the chart contains
+an HPA object, before it looks at a single workload kind. The new gate is
+nonetheless routed through the same R14b backstop as the old one, and the comment
+says why: *a backstop that only guards the gates you already distrust is not a
+backstop.*
+
+### Two properties where there was one
+
+`Coverage` gained a third field rather than a flag on the entries of
+`unassessed`, because every consumer reading that list today is enumerating the
+tool's **blind spots**, and quietly widening it would have filed a category the
+tool answered completely under a heading it had just disproved. New meaning, new
+field; the old field keeps its old meaning exactly.
+
+`complete` likewise keeps meaning "no blind spots", and `--require-coverage`
+still gates on it. This is deliberate and it is the point of the round: a build
+that failed on a DaemonSet chart would be the gate demanding the user add an
+autoscaler to a DaemonSet, which is the advice this entire round exists to stop
+the tool giving. `all_scored` is the new, narrower claim — that the mean really
+did run over all ten categories — and it is what the reports and the badge use.
+
+### What was left alone, on purpose
+
+The 94.0 for a chart with no HPA. It is a calibration argument with two sides,
+this round produced no measurement that settles it, and changing a weight because
+a distribution looked wrong is how a scoring model stops meaning anything.
+
+Three further inline copies of `("deployment", "statefulset")` in
+`checks_hpa.py`. They are copies of the same rotted list — but unlike the one in
+`_no_hpa` they decide which **findings** are emitted rather than whether the
+category counts, so widening them moves scores on charts nobody has measured.
+They are annotated in place so the next round measures them rather than
+discovering them.
+
+`SCALE_CANDIDATE_KINDS` deliberately does **not** match `ChartContext.workloads`.
+It adds `replicationcontroller` and `pod`, which are exactly the subject of the
+scale question and which that property does not return. Widening `workloads`
+itself would change the input set of every pod-level rule in the tool — probes,
+resources, security, the lot — and this round measured none of that.
+
+### The proof
+
+`proof/p18_notapplicable.py`: seven claims over nine charts that differ only in
+workload kind, with the expectations written as data **before** the runs so they
+are a specification and not a transcription. All pass. The state table it now
+produces:
+
+```
+kind                    HPA state         scorecard cell  rules
+Deployment              scored                      94.0  ['HP002']
+StatefulSet             scored                      94.0  ['HP002']
+ReplicaSet              scored                      94.0  ['HP002']
+ReplicationController   scored                      94.0  ['HP002']
+DaemonSet               not_applicable    not applicable  []
+Job                     not_applicable    not applicable  []
+CronJob                 not_applicable    not applicable  []
+Pod                     not_applicable    not applicable  []
+Rollout                 unassessed          not assessed  []
+```
+
+Two of that script's own checks were wrong first and are recorded in it rather
+than repaired quietly. Its score column read `data["categories"]`, a JSON key
+that does not exist, and printed `None` for all nine rows without failing — the
+assertion beside the table did not depend on it. A column that silently prints
+None for every input is indistinguishable from a fix that works. It now reads the
+rendered scorecard cell, which is both real and better evidence, since the string
+`| Horizontal Pod Autoscaling | 100.0 | A+ |` is the thing being disproved. And a
+check reading `complete is False or True` — true of every input, asserting
+nothing — was deleted rather than fixed, because a green line reading "nothing
+was skipped" is worse than no line: it would have gone on passing through a
+regression that failed `--require-coverage` on every DaemonSet chart.
+
+**Blast radius, measured rather than argued.** Thirty-five corpus charts plus
+fixtures, run against `git archive HEAD` and against the working tree with the
+same chart generator on both sides: **0 of 44 targets moved.** Not one score,
+grade, weight, per-category value or rule-id set changed anywhere. That proves
+the fix is surgical, and it proves something less comfortable — the corpus
+contains no chart whose only workload is unscalable, which is exactly why this
+survived fifteen rounds of a tool built to find things like it. A corpus is a
+sampling method, and a sampling method has blind spots that no amount of running
+it will reveal.
+
+`tests/test_r16_notapplicable.py` pins twenty-five cases: the three answers of
+`scale_class`; each kind's resulting state; that the two exclusion reasons make
+different claims; the four negative controls (unscalable **with** an HPA stays
+scored and the deduction reaches the score; predicate and gate agree so the
+backstop is unnecessary rather than merely unfired; one scalable object among
+four unscalable ones keeps the category real; a chart with no objects at all is
+blindness, not inapplicability); and the rendered artefacts, because an exclusion
+that were true only inside the data structure would have fixed nothing.
+
+One of those tests caught a bad **fixture** while asserting correct behaviour of
+the code, which is the only way round that is worth anything. `only_hpa_excluded`
+was first built by dropping a Dockerfile beside the DaemonSet chart, on the
+reasoning that DOCKERFILE was the missing input; running it printed
+`unassessed: ['JAVA', 'CROSS']`, so `complete` was False for two reasons that
+predate R16 and every assertion built on it was measuring something other than
+what its name said. Recorded in the file rather than corrected in silence.
+
+**Eight documentation figures moved and none of them is a regression.** Every
+report grew by exactly four lines and 388 bytes, because the scoring-model footer
+gained a paragraph explaining the new state and that footer documents the model,
+not the run. `diff` between the pre-R16 and post-R16 report of `fixtures/bad-chart`
+is those four lines and nothing else. `docs/usage.html`, `docs/reference.html`,
+`docs/container.html`, `docs/DOCKER.md` and `README.md` were re-measured — the
+helm-less set on a `PATH` with no helm binary, which is a different thing from
+`--helm off` — and `proof/p11_docsite.py` is green again at 179 checks.
+
+501 tests and 40 subtests pass. All 30 proof scripts exit 0.
+
+---
+
+## R17 — One list, re-typed eight times, and the copies stopped agreeing
+
+### How it was found
+
+By keeping a promise. R16 fixed one inline `("deployment", "statefulset")` and
+wrote next to the others: *"they are annotated in place so the next round
+measures them rather than discovering them."* That is a defensible place to stop
+a round and a terrible place to leave a codebase, because an annotated defect and
+an unknown one score the same on every chart anybody runs.
+
+So R17's first act was not a fix. It was one chart per workload kind — identical
+in every byte but the `kind:` line, the apiVersion that kind requires, and the
+fields that apiVersion makes mandatory — each carrying `replicas: 3` in the
+template and an HPA whose `scaleTargetRef` names that same object. Every one of
+them is the same mistake: helm and an HPA both writing `spec.replicas`, which is
+`HP050`, a `CRITICAL`.
+
+```
+kind                    before R17          after R17
+Deployment              85.5  C  HP050      85.5  C  HP050
+StatefulSet             85.5  C  HP050      85.5  C  HP050
+ReplicaSet              92.5  A- (silent)   85.5  C  HP050
+Rollout                 92.1  A- (silent)   85.5  C  HP050
+ReplicationController   NOT GRADED          85.5  C  HP050
+```
+
+Seven points and four grade bands between two spellings of one mistake. And the
+`A-` is worse than the seven points make it look. `HP050` is `CRITICAL`, and
+since R14 a non-`ASSUMED` critical caps the **overall** grade at `C` — so what
+`ReplicaSet` and `Rollout` escaped was not primarily a deduction, it was the cap.
+The tool's loudest signal, the one deliberately built to be un-diluteable by a
+weighted mean, switched off by a missing word in a tuple.
+
+`ReplicationController`'s row is a different failure again, and a more
+interesting one. It was not scored high and it was not scored low — it was not
+scored. `ChartContext.workloads` filters **first**, and its literal had never
+contained `"ReplicationController"`, so the document was gone before any rule
+saw it. `discovery`'s F9 then observed templates present and zero workloads, set
+`ungradeable_reason`, and the report printed `NOT GRADED`.
+
+That output is not dishonest. The tool did not claim a pass. But the reader
+cannot tell *"this chart has no workload"* from *"this chart has a workload of a
+kind I do not recognise"*, and those two call for opposite responses — the first
+means fix your chart, the second means fix the tool. Meanwhile
+`kube.SCALABLE_KINDS` has listed `ReplicationController` as a first-class
+scalable workload since R16 and `scoring` scored its HPA category the whole time,
+so the tool held two contradictory opinions about whether the object existed and
+never noticed, because nothing in it compares the two lists.
+
+### Eight sites, and they do not all want the same answer
+
+The seventh instance of this fault family — after R8's `DOCKERFILE`, R11's
+`RESOURCES`, R13's `CROSS` gate, R14b's gate that deleted real deductions, R15's
+`proofs._pairs()` filter and R16's `_no_hpa` — is not one bug with eight copies.
+The first draft of this round assumed it was, and the correct move was to stop
+and ask each site what question it was actually asking. There turned out to be
+three questions, and collapsing them would have re-introduced the exact advice
+R16 spent a round removing.
+
+**Can an HPA target this?** That is `/scale`, and it is `SCALABLE_KINDS`.
+`Rollout` is out (the tool does not know whether that CRD implements the
+subresource, which is why R16 built the `unknown` answer).
+
+**Is the scale question even meaningful here?** That is `SCALE_CANDIDATE_KINDS`,
+and it deliberately **includes** `DaemonSet` — precisely so R16 can answer "not
+applicable" instead of scoring silence 100.
+
+**Does this object carry a replica count the chart author chose?** Nothing named
+this, and it is the question all five inline pairs were actually asking:
+
+```
+HP050/HP051   helm and an HPA fighting over spec.replicas
+AV001         replicas: 1 with no HPA is zero redundancy
+AV002/AV003   rollout strategy and pod spreading
+AV010         a PDB protects a replica set from voluntary disruption
+```
+
+That is `kube.REPLICA_MANAGED_KINDS`, new this round. `Rollout` is **in** it and
+in neither of the others: an Argo `Rollout` has `spec.replicas`, is routinely
+paired with an HPA, and `helm upgrade` resets that field on it at exactly the
+moment it does on a `Deployment`. `DaemonSet`, `Job`, `CronJob` and `Pod` are
+**out** and it is not an oversight — a DaemonSet's count is a property of the
+cluster, a Job's parallelism is fixed at creation, and a bare Pod is one pod.
+Telling any of them to raise their replica count or add a PDB is the
+DaemonSet-autoscaler advice R16 removed, wearing a different rule ID.
+
+Three sets, three memberships, no two identical. `kube.py` says so at the
+definition, because the next person to see three overlapping sets will want to
+tidy them into one.
+
+### The eighth copy was R15's own fix
+
+The last site was not on R16's list of five, and finding it is the part of this
+round worth generalising from. `proofs._pairs()` — the function R15 fixed, for
+exactly this fault — contained:
+
+```python
+if (doc.kind or "").lower() not in (
+        "deployment", "statefulset", "daemonset",
+        "replicaset", "job", "cronjob", "rollout"):
+    continue
+```
+
+Read the literal. It is precisely the contents of `ctx.workloads` at the moment
+R15 was written, retyped by hand. R17 added `ReplicationController` to
+`ctx.workloads`, and this line went stale **the same day**, silently, in exactly
+the manner its own comment above it describes. A fix for a class of bug,
+implemented as another instance of that bug, broken within one round by the round
+that was hunting it.
+
+Measured on two charts identical but for `kind:`, each a `temurin:21-jre` asking
+for `-Xmx6g` under a `4Gi` limit:
+
+```
+Deployment              C   88.9   XF001
+ReplicaSet              C   88.9   XF001
+ReplicationController   A-  92.7   (none)
+```
+
+The tuple is **gone** rather than corrected. A filter whose only effect is to
+re-state its own input, minus whatever the author forgot, is not a filter.
+`ctx.workloads` *is* the set of kinds that run containers, `kube.pod_spec()`
+already unwraps every one of them, and there is nothing left at that line to
+decide. A copy that does not exist cannot rot.
+
+### The site that was left alone, and why that is a result
+
+One of the eight is still there, and this is the part that is easy to fix and
+wrong to. `_replicas_conflict`'s nested `_single_obvious_target` helper contains
+the same pair, and **two constructed attempts failed to reach it**.
+
+The first used a `scaleTargetRef` of `{{ .Release.Name }}-x`, which survives
+static parsing as a resolvable literal, so `any_literal_mismatch` returned False
+three lines earlier. The second named a `_helpers.tpl` include, which the static
+parser rewrites to `HELM_TPL_n` — and the loop above matches anything starting
+with `HELM` and returns True before the branch is consulted. Five charts
+differing only in a second workload's kind emitted identical `HP050` under both
+probes. The branch is reachable only when the ref name contains `<` and does not
+begin with `HELM`, a parser state neither probe produced.
+
+Changing an unreached predicate is not a fix. It is a guess with a diff attached,
+and this entire fault family exists because somebody once made exactly that edit.
+So the line stays, with the failed measurements written at the site — and with
+the one thing the measurement *did* establish: this site is a **count used as a
+confidence test**, not a filter, so widening it would make `HP050` fire **less**.
+That is the opposite direction from the site forty lines below it, which is the
+concrete reason "replace all eight with one set" would have been wrong.
+
+`proof/p19_replicamanaged.py`'s CLAIM 5 backs this with a line tracer rather than
+an argument: fourteen targets traced, `checks_hpa.py:751` executed **0 times**.
+
+### Two strings that were quietly lying
+
+`HP050`'s title was the fixed noun `"Rendered Deployment sets spec.replicas
+while an HPA manages it"`, sitting above a detail line that already interpolated
+`w.kind`. The moment the loop reached `ReplicaSet` and `Rollout`, that title
+would have printed `Deployment` over a finding whose own next sentence said
+`Rollout` — and a reader who greps their templates for a Deployment, finds none,
+and concludes the tool is broken has been failed by a formatting decision, not a
+rule.
+
+`AV010`'s detail was `"Chart ships Deployments/StatefulSets but no PDB."`, naming
+two kinds the chart might contain neither of. It now names what is actually
+there: on a two-kind chart, `"Chart ships Deployment, StatefulSet but no PDB."`
+
+Neither is scored. Both are the report claiming to have seen something it did
+not, which is the same species of defect as the rest of this round in the only
+place the user actually reads.
+
+### The blast radius, measured
+
+Fifty targets — the thirty-five-chart corpus, both fixtures, and six synthetic
+one-workload charts differing only in `kind:` — run against `git archive HEAD`
+and against the working tree, same machine, same chart generator feeding both
+sides:
+
+```
+identical in every measured field       9
+AV010 detail string changed, nothing else   38
+score / grade / rules moved             3
+```
+
+The three that moved are the synthetic `ReplicaSet`, `ReplicationController` and
+`Rollout` charts, which is precisely what the round set out to fix.
+`ReplicaSet` gained `HP050` + `AV003` + `AV010`; `Rollout` gained only `HP050` +
+`AV010`, because `_availability` had already been individually patched for
+`Rollout` at some point while `_pdb` had not — the divergence of the copies,
+visible in the diff of a sweep; and `ReplicationController` gained ten rules,
+because it was not being looked at at all. `DaemonSet` did **not** move, which is
+the negative control: the fix reaches the kinds that manage replicas and stops at
+the kinds R16 taught the tool to leave alone.
+
+**Zero corpus charts moved in score.** That is the fix being surgical, and it is
+also the corpus admitting something: the `proofs._pairs()` deletion moved nothing
+across all fifty targets, because not one of the fifty is both a
+`ReplicationController` *and* a JVM chart. The two-chart probe above is the only
+thing that measures that edit. A corpus is a sampling method, and this is the
+second consecutive round where the thing being fixed was invisible to it.
+
+### Two of this round's own checks were wrong, and one of them could not fail
+
+**A documented figure had rotted by 344 bytes, and the check on it was green the
+whole time.** `docs/container.html` quotes two byte figures — the helm-mode one
+(`N bytes either way`) and the helm-less one (`(N bytes)`) — and
+`proof/p11_docsite.py` checked whichever one matched the host it happened to run
+on, an `if/else` on `HAVE_HELM`. Every machine this project has run on except one
+has helm. So the helm-less figure was checked exactly once, on the second machine
+that ever produced it, and never again; the page said `63410` while the real
+helm-less report had grown to `63754`.
+
+A check that only runs on a machine nobody uses is the same species of defect as
+R16's unasked question: the tool was not wrong, it just never looked. Both
+figures are now measured on **every** host. Helm-mode still needs helm and there
+is no honest way to synthesise it without one. Helm-less needs the opposite, and
+that *is* synthesisable exactly — build a `PATH` of symlinks to every executable
+currently on `PATH` except `helm`. Notably **not** `--helm off`, which produces a
+different report (`63570` here, 184 bytes short) because it says "helm is
+installed but was not used" where the absent-helm run says "helm is not on PATH".
+The page's claim is about the second one, so the second one is what gets built.
+
+**The other three figures moved for a reason that is not a bug, and it took
+arithmetic to establish that.** The helm-mode figure went `63092` → `63078`, and
+`63092` was suspiciously exactly the old number. The report's `Generated :`
+line is normalised before measuring, from 38 characters to 24 — a fixed 14-byte
+reduction, fixed because the timestamp is fixed-width. `63092` was the R16-era
+*normalised* figure recorded in the wrong column, and R17's `AV010` change
+happened to remove exactly 14 bytes as well. Two 14s, one a constant of the
+measurement and one a coincidence of the diff. Confirming that rather than
+accepting the tidy-looking equality is the only reason it is written down here.
+
+**Expectation E4 in the blast-radius sweep was refuted by its own run — and
+contradicted E5 three lines below it.** E4 said "no target gains or loses a
+finding ID"; E5 explicitly predicted the synthetic kind charts would gain
+findings. Both were written before the first run, in the same sitting. That is
+not the measurement finding something surprising, it is the expectations being
+internally inconsistent, and it is recorded as an error in writing them rather
+than narrowed after the fact into something the run happened to satisfy.
+
+**And one check in `p19` could not fail.** CLAIM 5 proves the parked site is
+unreached by tracing it, which requires locating the line. The first version
+located it by grepping for the literal — which matched **two** lines: the code at
+751, and line 73, a *docstring* quoting the old code in prose. The tracer
+faithfully traced line 73, a line never executed by construction, reported zero
+hits, and printed `PASS`. The underlying claim was true and the evidence for it
+was worthless, and the only thing that caught it was a structural assertion
+beside it that looked redundant. The site is now located with `ast`, which sees
+expressions and not prose, and the failure is written at the site: *a check that
+cannot fail is not a check* — which is the argument for keeping assertions that
+look redundant.
+
+### The shipped sample reports were nine months of rounds behind
+
+Grepping for the old `AV010` string to see where else it had been published
+found it in `sample_reports/`, and pulling that thread found something larger:
+the four shipped samples were generated on 2026-07-19 and had not been
+regenerated since, so they were missing the explanatory text added by R2, R3,
+R9, R13, R14, R16 **and** R17. A prospective user's first look at this tool's
+output was a report that no version of the tool would produce.
+
+They are regenerated — deliberately on a `PATH` with no `helm` binary, because
+their header carries the absent-helm wording rather than the `--helm off`
+wording, and regenerating in the other mode would have made the diff about the
+mode instead of about the rounds. The result is the reassuring half of this
+round: **no score, grade or finding count moved in either sample.** `bad-chart`
+is still `45.5 / F` with `11 critical, 11 high, 14 medium, 16 low`. Everything
+in a 400-line diff is the tool explaining itself better. The samples were stale
+in their prose and current in their verdict, which is the failure mode you want
+if you have to have one.
+
+One thing was noticed while doing it and is **not** fixed here: `-o report.html`
+writes the *text* report to that filename. The HTML report is a separate
+`--html [PATH]` flag, which `--help` does say, but a user who names their output
+`.html` and opens it in a browser gets a wall of monospace. That is a real papercut,
+it is unrelated to this round's fault family, and inventing a format-from-extension
+rule at the end of an unrelated round is how flags acquire behaviour nobody
+specified. Recorded for a round that can measure it.
+
+### What was left alone, on purpose
+
+Bare `Pod` is still excluded from `ctx.workloads`. A Pod has no controller, so
+`AV001`'s "replicas: 1 is zero redundancy" and `AV010`'s PDB advice have no field
+to point at, and every rule that reaches through `spec.template` would need a
+second code path. It is a real gap. It is recorded in `models.py` rather than
+half-fixed, because adding the kind and letting the pod-level rules mostly-work
+is precisely the failure mode this round exists to document.
+
+`checks_hpa.py:751`, above — unreached by two probes, annotated with both.
+
+### Verification
+
+`proof/p19_replicamanaged.py`: six claims, twenty-five checks, expectations
+written as data above every run. All pass. CLAIM 2 is the anti-over-correction
+guard — `DaemonSet`, `Job` and `CronJob` must receive **none** of
+`{HP050, HP051, AV001, AV002, AV003, AV010}` — and it is the check that would
+fail first if a future round tidied the three kind sets into one.
+
+`tests/test_r17_replicamanaged.py`: fifteen tests across six classes, written as
+**equality between kinds** rather than as absolute numbers, so they pin the
+property (one defect, one verdict) and not this week's arithmetic.
+
+516 tests pass. All 31 proof scripts exit 0. `proof/p11_docsite.py` is green at
+180 checks with both byte figures now measurable on any host.
+
+## R18 — Thirty-five charts, thirty-three of them the same shape
+
+### The round did not start with a defect
+
+R17 ended with eight sites closed and a sentence that should have been
+uncomfortable: both R16's defect and R17's had been found by hand-built one-off
+charts, written after someone had already guessed where to look. The
+thirty-five-chart corpus — the instrument this project points at as evidence —
+had been silent through both.
+
+So R18's first act was to measure the instrument instead of the tool. Across
+all thirty-five charts:
+
+```
+Deployment             33
+StatefulSet             1
+CronJob                 1
+ReplicaSet              0
+ReplicationController   0
+Rollout                 0
+DaemonSet               0
+Job                     0
+```
+
+A Deployment monoculture. Every round that has ever claimed "thirty-five charts
+agree" was claiming that thirty-three copies of one shape agree. That is not a
+corpus, it is a fixture with variations in the values file, and no amount of
+growing it — fifteen to thirty-two to thirty-five — changes the axis it does not
+vary.
+
+### The fix is a generator, not a chart
+
+`proof/chartgen.py` writes charts over a space rather than one at a time:
+
+* **Tier A** — eight kinds, one shape, nothing else varying. Every difference
+  between the eight files is forced by the Kubernetes API (a CronJob's
+  `schedule`, a StatefulSet's `serviceName`, a Job's `restartPolicy`), and each
+  forced difference is printed next to any divergence it could explain, so
+  "the CronJob scored differently" is never reported without the reason it
+  might legitimately have.
+* **Tier B** — a deterministic greedy pairwise covering array over six axes
+  (kind × replicas × resources × heap × hpa × probes) → 45 charts, every pair of
+  values from every pair of axes covered at least once. No RNG.
+
+`proof/p20_kindsweep.py` is the instrument that runs it, and the thing that
+makes it an instrument rather than a second opinion is what it is **not**
+allowed to know. Two oracles:
+
+* **O1** — a verdict field (score, grade, graded) differs from the Deployment
+  variant, or a rule fires on some kinds and not others.
+* **O2** — a chart was generated and the tool graded nothing, or a whole rule
+  family the Deployment raised went silent, or fewer than half its findings
+  appeared.
+
+Neither contains a Kubernetes kind name, a rule ID, or a threshold copied from
+`kube.py`. A test (`AT5a`) tokenizes the oracle and fails if one appears. The
+oracles do not find defects; they raise **questions**, and a question is not a
+defect until it is either argued away in `proof/kindsweep_expect.txt` with a
+written reason or reproduced with a standalone chart and fixed.
+
+### Two things this round got wrong, kept rather than erased
+
+**The acceptance test was built to fail first.** Its whole claim is that the
+instrument would have found the last two rounds unaided, so it runs against
+`713774c` — the commit before R16 — with an **empty** expectations file, and
+requires that R16's and R17's defects both reappear. The first version used one
+baseline shape and `AT4` (R16's defect: a DaemonSet with no HPA scoring a free
+100) did not appear, because R16's defect only exists on a chart with **no**
+HPA and that baseline had one. A second baseline was added. The design changed
+and the test did not, and both are recorded in `chartgen.BASELINES`.
+
+**`AT5b` fails on every run and is supposed to.** The design fixed the
+no-answer-key property over *the oracle*; the first implementation checked the
+oracle **and the generator**, and the generator failed it — its prose cites
+`HP050` while explaining why the `replicas` axis has a `conditional` value. A
+tokenize pass proved that no forbidden name appears in generator *code*
+(`AT5b-exec`, which passes). The honest reading is that the axes were chosen
+with the silent-rule list in view, which makes Tier B **targeted** coverage, not
+blind coverage. The response was disclosure, not deletion: `AT5a` and
+`AT5b-exec` assert the property the design actually fixed, and `AT5b` is
+reported `FAIL` on every run so the weaker claim cannot be quietly forgotten.
+Deleting the sentence would have made the test pass by removing the admission.
+
+### The ninth site
+
+With an empty expectations file the sweep raised 21 questions on HEAD. Most
+decomposed into rules R16 and R17 had already argued. One did not.
+
+Two charts, container blocks **byte-identical** — a liveness probe with
+`initialDelaySeconds: 5`, a readiness probe, no `startupProbe`, a JVM image with
+`-Xmx6g` — differing only in `kind` and the `restartPolicy: Never` the Job
+schema forces:
+
+```
+                  score  grade   PB findings      Health Probes & Lifecycle
+Deployment         92.2  A-      PB004 PB005       82.0  B-
+Job                94.8  A       (none)           100.0  A+
+```
+
+The Job is **strictly worse** than the Deployment — its `restartPolicy` makes a
+liveness kill permanent rather than a restart — and it scored two points higher
+with a perfect probe category. And the same report file contradicted itself:
+line 106 printed `Health Probes & Lifecycle | 100.0 | A+`, and line 308 drew
+`TABLE 3: Probe budget vs JVM startup` showing `startupProbe window: none |
+liveness starts immediately`. The tool measured the problem, printed the
+measurement, and scored the category as if it had not.
+
+Cause, at `checks_workload.py:591`:
+
+```python
+if kind in ("job", "cronjob"):
+    return
+```
+
+The ninth copy of the inline kind list R17 closed at eight sites — this one
+uncommented, so R17's sweep of annotated sites never reached it — and the second
+instance of R16's defect: **a filter written to choose findings was also,
+silently, choosing the denominator.**
+
+### Five rules, and they do not want the same answer
+
+The wrong fix is "run the probe rules on Jobs", which replaces a false pass with
+a false finding. Asked one at a time:
+
+| rule | | for a Job or CronJob |
+|---|---|---|
+| `PB001` | missing readiness probe | **SKIPPED** — nothing routes traffic to a Job's pods, so readiness has no subscriber |
+| `PB002` | missing liveness probe | **SKIPPED** — a wedged Job's real control is `activeDeadlineSeconds` |
+| `PB003` | liveness and readiness identical | **SKIPPED** — follows from the two above |
+| `PB004` | startup budget vs JVM warm-up | **RUNS** — a Job's container still starts a JVM |
+| `PB005` | liveness with no `startupProbe` | **RUNS** — same, and the `restartPolicy` makes it worse |
+
+The set that turns the first three off is `kube.BATCH_KINDS`, and it is a
+**fifth** kind set because it answers a fifth question: *does this object run to
+completion rather than serving traffic indefinitely?* It matches none of the
+existing four — `SCALABLE_KINDS` and `UNSCALABLE_KINDS` and
+`SCALE_CANDIDATE_KINDS` are about the `/scale` subresource,
+`REPLICA_MANAGED_KINDS` is about `spec.replicas`, and every one of them puts
+`daemonset` on the wrong side of this question: a DaemonSet is unscalable, is
+not replica-managed, and **serves traffic all day**, so it needs its readiness
+probe checked. Each entry carries a written reason, and a test asserts they are
+non-empty, so a future kind cannot be added by someone who cannot say why.
+
+### After
+
+```
+                  score  grade   PB findings      Health Probes & Lifecycle
+Deployment         92.2  A-      PB004 PB005       82.0  B-     (unchanged)
+Job                92.7  A-      PB004 PB005       82.0  B-
+```
+
+The Deployment does not move — the guard is on `batch`, so any movement there
+would be a regression, not a fix.
+
+### Blast radius, and the corpus failing to notice
+
+All thirty-five corpus charts plus the nine fixtures, run against `HEAD` and
+against the working tree:
+
+```
+MOVED:      0
+UNCHANGED: 44
+```
+
+The expectation written before that run said at least one chart would move,
+because the census had found a CronJob. **It was refuted, and the refutation is
+the more interesting result.** `c22-cronjob-hpa` declares no probes at all — its
+container has an image, an env var and resources — so the only rules that could
+ever have fired on it are the three that are still, correctly, skipped. The
+corpus did not merely fail to find this defect; it could not have observed the
+fix either. Generated charts with probes were used to close the check instead,
+and exactly the two batch kinds moved:
+
+```
+gen/Deployment  94.8/A -> 94.8/A   +-
+gen/Job         96.4/A -> 95.7/A   +PB005
+gen/CronJob     96.4/A -> 95.7/A   +PB005
+gen/DaemonSet   95.7/A -> 95.7/A   +-
+```
+
+One more check in that script was wrong in a way worth recording: the helper
+that read a category score from the JSON payload assumed
+`score_coverage["assessed"]` held dicts with a `score` key. It holds bare
+strings — the per-category number exists **only** in the text report. So the
+check that was meant to catch "a category scored 100 while findings existed"
+compared `None` to `100.0` and passed vacuously. It is left in the script,
+still reported, with the replacement beside it that reads the number from the
+text report where the number actually lives.
+
+### What was dispositioned, and what was refused
+
+Every Tier A divergence decomposes with no residue into five rules:
+
+```
+hpa-absent   CronJob/DaemonSet/Job  95.7 vs 94.8   missing AV003 AV010 HP001
+             Rollout                94.9 vs 94.8   missing HP001
+hpa-present  CronJob/DaemonSet/Job  92.0 vs 91.3   missing AV003 AV010 HP050
+                                                   extra   HP042
+```
+
+`HP001`, `HP050`, `HP042` and both Rollout keys are argued in
+`proof/kindsweep_expect.txt` and closed. `AV003` and `AV010` are **not**, and
+neither is anything that sums them, which is why `O1a:DaemonSet`, `O1a:Job`,
+`O1a:CronJob` and their `O2` twins are absent from that file. Both rules are
+gated on `REPLICA_MANAGED_KINDS`, which is documented and deliberate — and
+deliberate is not the same as correct. `AV003` asks about **pod spread**, and
+for a DaemonSet the silence is definitionally right, but for a `Job` with
+`parallelism > 1` the rule's own stated reason still applies and it is being
+answered by a set named after `spec.replicas`. `AV010`'s eviction API honours a
+PDB for any pod its selector matches, Job pods included. Neither has been
+measured. Signing them off would be exactly the move this method exists to
+prevent, so they stay OPEN and the sweep keeps reporting them: **16 open
+questions** at the end of the round, by choice.
+
+### Recorded, not fixed
+
+* No rule for `activeDeadlineSeconds`, which is a Job's actual hang control and
+  the reason `PB002` can be skipped honestly.
+* A Job that *declares* a readiness probe deserves a "delete this" finding. It
+  does not exist.
+* `AVAIL` is scored 100 at weight 8 on a Job with no `AV` rule applicable. That
+  is a coverage gap rather than a fabrication — a Job **can** have availability
+  concerns the tool does not check — but it is the same shape as R16's defect
+  and it should be answered by `not_applicable_reason`, which is still
+  HPA-only.
+* `kube.py` says in one comment that a Rollout "DOES expose /scale" and in
+  another that the tool cannot know. Both cannot be true.
+* 69 of 138 declared rule IDs fired nowhere in this sweep. Tier B did fire five
+  the hand-written corpus has never reached — `HP001 JV022 JV025 PA001 RS004`.
+
+### Verification
+
+`proof/p20_kindsweep.py` — 6.7s, 45 Tier B charts, 8/8 kinds and every axis
+value covered. `--acceptance` — 2.4s, `AT1`–`AT7`, `AT5b` failing by design.
+`tests/test_r18_batchprobes.py` — 13 tests, written as **equality between a
+batch kind and its non-batch twin** where the answer must not depend on the
+kind, and as an explicit set difference where it must. One of them is a control
+that proves the tokenizer in the test above it can still see a real regression.
+
+529 tests pass. All 32 proof scripts exit 0. `proof/p11_docsite.py` green.

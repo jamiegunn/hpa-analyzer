@@ -117,6 +117,9 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nativeoverride  # noqa: F401,E402  (R12: the CLI refuses to run
+# outside the pinned image; this sets the documented override so the
+# evidence layer can still spawn `python3 -m hpaanalyzer`. See the module.)
 
 from baseline import BASELINE, R8_TREE, resolve as _resolve  # noqa: E402
 

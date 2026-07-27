@@ -1,0 +1,76 @@
+# Dispositions for the questions proof/p20_kindsweep.py raises.
+#
+# This file started EMPTY and that was the point: the acceptance test (AT1-AT7,
+# see the p20 docstring) runs the instrument against the last commit before R16
+# with nothing in here at all, and requires that it rediscovers both of the last
+# two rounds' defects unaided. An expectations file written before the first run
+# would have been a list of the answers.
+#
+# FORMAT   <key> <one line of argument>
+#   key    O1a:<Kind>          a verdict field differing from the Deployment
+#          O2:<Kind>           silence where a workload was generated
+#          O1b:<RULE>          a rule firing on some kinds and not others
+#
+# A line here is a claim that the divergence is CORRECT, and it has to say why.
+# "It has always done that" is not a reason. Anything not listed here is OPEN:
+# either it gets an argument, or it gets reproduced with a standalone chart and
+# fixed.
+#
+# ---------------------------------------------------------------------------
+# WHAT THE FIRST TRIAGE ACTUALLY FOUND (R18)
+#
+# Every Tier A score divergence decomposes, with no residue, into exactly five
+# rules. Measured, not assumed - the decomposition is printed per kind and per
+# baseline and the numbers below are copied off that run:
+#
+#   hpa-absent   CronJob/DaemonSet/Job  95.7 vs 94.8  missing AV003 AV010 HP001
+#                Rollout                94.9 vs 94.8  missing HP001
+#   hpa-present  CronJob/DaemonSet/Job  92.0 vs 91.3  missing AV003 AV010 HP050
+#                                                     extra   HP042
+#   ReplicaSet, ReplicationController, StatefulSet: byte-identical to the
+#   Deployment on both baselines. Rollout too, on hpa-present.
+#
+# So the O1a and O2 keys are not independent questions. Each one is a SUM of
+# the O1b keys beside it, and it can only be dispositioned once every rule in
+# that sum is. Three of the five are argued below. Two are not, and that is
+# why the DaemonSet, Job and CronJob keys are absent from this file: not an
+# oversight, a refusal to sign off a total whose parts are open.
+# ---------------------------------------------------------------------------
+
+O1b:HP001  Fires only on the four SCALABLE_KINDS. HP001 says "you shipped autoscaling values but no HPA object"; for a DaemonSet, Job or CronJob there is no scale subresource for an HPA to target no matter what the values say, so the finding would be advice the user cannot take. R16 routes those charts to NOT APPLICABLE with a written reason and drops the HPA weight from 100 to 85 rather than scoring an absent category 100 - the coverage block quoted above shows it doing exactly that.
+O1b:HP050  Fires only on the five REPLICA_MANAGED_KINDS. HP050 is about the relationship between spec.replicas and an HPA; a DaemonSet, Job and CronJob have no spec.replicas field for the rule to have an opinion about. Silence here is the absence of a subject, not a missed check.
+O1b:HP042  Fires ONLY on CronJob, DaemonSet and Job, and that is the point of it: an HPA that names an unscalable kind is a CRITICAL misconfiguration, and it is the one case where the batch/daemon kinds should score WORSE than the Deployment, not better. It is silent on Rollout deliberately - the tool classifies Rollout as 'unknown' rather than guessing whether a third-party CRD implements /scale, and a CRITICAL finding is not the place to guess.
+O1a:Rollout  94.9 vs the Deployment's 94.8 on hpa-absent, and identical on hpa-present. The whole delta is HP001, and the coverage block shows HPA in UNASSESSED, not in NOT APPLICABLE - the tool is saying it does not know whether an Argo Rollout exposes /scale, which is true, rather than claiming the category cannot apply. The 0.1 is the arithmetic of scoring nine categories instead of ten. R16's discriminator holds: it failed to FIND evidence, so UNASSESSED; it does not HOLD evidence that the subject cannot exist, so not NOT APPLICABLE.
+O2:Rollout  The HP family being entirely silent on Rollout is the same fact as O1a:Rollout above, seen by the other oracle: HP001 is the only HP finding on the hpa-absent Deployment, so 'silent' and 'one rule fewer' are the same event counted twice.
+
+# ---------------------------------------------------------------------------
+# DELIBERATELY LEFT OPEN - carried to R19
+#
+# O1b:AV003, O1b:AV010, and everything that sums them:
+#   O1a:DaemonSet  O1a:Job  O1a:CronJob  O2:DaemonSet  O2:Job  O2:CronJob
+#
+# Both rules are gated on REPLICA_MANAGED_KINDS, which is documented and
+# deliberate at `_availability` and `_pdb`. Deliberate is not the same as
+# correct, and the argument only survives for one of the three kinds:
+#
+#   AV003 "no pod anti-affinity / topology spread". For a DaemonSet the
+#   silence is definitionally right - a DaemonSet already places one pod per
+#   eligible node, so the spreading the rule asks for is what it already does.
+#   For a Job with parallelism > 1 it is not: several pods can land on one
+#   node and the rule's own stated reason ("a single node failure then behaves
+#   exactly like replicas=1") still applies. REPLICA_MANAGED_KINDS is being
+#   used to answer a question about POD SPREAD, which is not the question that
+#   set names - the same category error this whole fault family is made of.
+#
+#   AV010 "chart ships X but no PDB". The eviction API honours a PDB for any
+#   pod its selector matches, DaemonSet and Job pods included; `kubectl drain`
+#   skipping DaemonSet pods by default is a property of that one client, not
+#   of the object. So the blanket silence is at best unargued.
+#
+# Neither is fixed this round. R18's fix was scoped to the one defect the
+# instrument condemned with a standalone reproduction (checks_workload._probes,
+# the ninth inline kind list); inventing a sixth kind set on the strength of
+# an argument nobody has measured yet would be the exact move this method
+# exists to prevent. They stay OPEN, which is what an undispositioned key
+# means, and the sweep will keep reporting them until someone measures them.
+# ---------------------------------------------------------------------------

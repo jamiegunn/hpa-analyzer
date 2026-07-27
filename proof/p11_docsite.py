@@ -28,10 +28,14 @@ import html
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import nativeoverride  # noqa: F401,E402  (sets HPA_ANALYZER_ALLOW_NATIVE - see the module for why)
 SITE = os.path.join(REPO, "docs")
 PAGES = ["index.html", "usage.html", "reading-the-report.html",
          "container.html", "reference.html", "limits.html"]
@@ -300,8 +304,17 @@ for label, extra in [("summary", ["--summary"]), ("default", []),
 # Both sets are published: the table is a helm-mode run, and the note under it
 # gives the helm-less figures. Whichever machine this runs on, the site has
 # already committed to a number for it, so there is always something to fail.
-QUOTED = ({"summary": 167, "default": 906, "all": 1018, "full": 1238} if HAVE_HELM
-          else {"summary": 170, "default": 919, "all": 1031, "full": 1251})
+# R16 moved every one of these eight numbers by exactly +4, and the reason is
+# worth stating because "the docs figures drifted again" is how a real
+# regression gets waved through: the scoring-model footer gained a four-line
+# paragraph explaining the NOT APPLICABLE state, and it is printed
+# unconditionally - it documents the MODEL, not the run - so a chart with no
+# not-applicable category grows by the same four lines. `diff` between the
+# pre-R16 and post-R16 report of fixtures/bad-chart is those four lines and
+# nothing else. Both sets were re-measured, the helm-less one on a PATH with no
+# helm binary rather than with `--helm off`, which is a different thing.
+QUOTED = ({"summary": 171, "default": 910, "all": 1022, "full": 1242} if HAVE_HELM
+          else {"summary": 174, "default": 923, "all": 1035, "full": 1255})
 for label in ("summary", "default", "all", "full"):
     quoted = QUOTED[label]
     check("verbosity table: --%s is %d lines" % (label, quoted),
@@ -475,13 +488,42 @@ else:
     print("  SKIP  R11 re-measurement - needs all four external tools")
 
 # claims about the repo itself that the site makes
-check("requirements.txt really is just PyYAML, as the site says",
-      open(os.path.join(REPO, "requirements.txt")).read().strip().startswith("PyYAML"))
-check("both entry points the site names exist",
-      os.path.exists(os.path.join(REPO, "hpa-analyzer.py"))
-      and os.path.exists(os.path.join(REPO, "hpaanalyzer", "__main__.py")))
-check("the wrapper the container page documents exists and is executable",
+check("the wrapper the site tells people to install exists and is executable",
       os.access(os.path.join(REPO, "bin", "hpa-analyzer"), os.X_OK))
+
+# R12: the site used to teach `python3 -m hpaanalyzer` and `python3
+# hpa-analyzer.py` as equal alternatives. Both are now refused, so a page that
+# still shows one in a copy-paste block is teaching a command that exits 2.
+#
+# The test is on `$ `-prefixed transcript lines and bare command blocks, NOT on
+# the whole page: index, reference, container and DOCKER.md all *name* the
+# module form in prose, to say it is refused and why, and a substring ban over
+# the page text would forbid explaining the change. What must not appear is an
+# invocation presented as a thing to run.
+NATIVE_FORMS = ("python3 -m hpaanalyzer", "python3 hpa-analyzer.py")
+for page, src in PAGE_SRC.items():
+    offenders = []
+    for block in re.findall(r"<pre><code>(.*?)</code></pre>", src, re.S):
+        for line in html.unescape(block).splitlines():
+            stripped = line.strip().lstrip("$ ").strip()
+            if any(stripped.startswith(f) for f in NATIVE_FORMS):
+                offenders.append(stripped[:60])
+    check("no page offers a native invocation to copy: %s" % page,
+          not offenders, "; ".join(offenders))
+
+# and the refusal the site promises is really what the program does
+_refusal = subprocess.run(
+    [sys.executable, "-m", "hpaanalyzer", os.path.join(REPO, "fixtures",
+                                                       "good-chart")],
+    cwd=REPO, capture_output=True, text=True,
+    env={k: v for k, v in dict(os.environ, PYTHONPATH=REPO).items()
+         if k != "HPA_ANALYZER_ALLOW_NATIVE"})
+check("the module really does exit 2 as index.html and reference.html say",
+      _refusal.returncode == 2, f"returncode={_refusal.returncode}")
+check("and its message really does point at the wrapper the site names",
+      "./bin/hpa-analyzer" in _refusal.stderr)
+check("docs/DEVELOPING.md, which index.html links to, exists",
+      os.path.exists(os.path.join(REPO, "docs", "DEVELOPING.md")))
 wrapper = open(os.path.join(REPO, "bin", "hpa-analyzer"), encoding="utf-8").read()
 for var in ["HPA_ANALYZER_OUTPUT_DIR", "HPA_ANALYZER_IMAGE",
             "HPA_ANALYZER_CONTAINER_CLI", "HPA_ANALYZER_DRY_RUN",
@@ -500,19 +542,76 @@ check("the Dockerfile really has no CMD, as the container page claims",
 # it - so looking for the literal in that file tests nothing. Re-measure it the
 # way p10 does (timestamp normalised, because `Generated :` is a property of the
 # clock, not of the container) and hold the page to the measurement.
-_p = run(["fixtures/bad-chart", "-o", os.path.join(OUT, "bytes.txt")])
-with open(os.path.join(OUT, "bytes.txt"), "rb") as fh:
-    _body = re.sub(rb"^Generated .*$", b"Generated : <normalised>", fh.read(),
-                   flags=re.M)
+#
+# R17 rewrote this block, and the reason is a defect this check USED to have.
+# The container page quotes two byte figures: the helm-mode one ("N bytes
+# either way") and the helm-less one ("(N bytes)"), and the old code checked
+# whichever one matched the host it happened to run on - an if/else on
+# HAVE_HELM. Every host this project has ever run the suite on except one has
+# helm, so the helm-less figure was checked once, on the second machine that
+# produced it, and never again. It had rotted by 344 bytes: the page said
+# 63410, a figure true at the iteration that measured it, while the real
+# helm-less report had grown to 63754. A check that only runs on a machine
+# nobody uses is the same species of defect as R16's unasked question and
+# R14b's deleted deductions - the tool was not wrong, it just never looked.
+#
+# So both figures are now measured on every host. helm-mode still needs helm,
+# and there is no honest way to synthesise it without one. helm-LESS needs the
+# opposite and that IS synthesisable exactly: build a PATH of symlinks to every
+# executable currently on PATH except `helm`. Not `--helm off`, which is a
+# different report (63570 here, 184 bytes short of the real thing) because it
+# says "helm is installed but was not used" where the absent-helm run says
+# "helm is not on PATH. Installing it ... materially improves precision". The
+# page's claim is about the second one, so the second one is what gets built.
+def _measure(argv, env=None):
+    _p = run(argv + ["-o", os.path.join(OUT, "bytes.txt")], env=env)
+    if _p.returncode != 0:
+        return None
+    with open(os.path.join(OUT, "bytes.txt"), "rb") as fh:
+        return len(re.sub(rb"^Generated .*$", b"Generated : <normalised>",
+                          fh.read(), flags=re.M))
+
+
+def _path_without_helm():
+    shim = tempfile.mkdtemp(prefix="p11-nohelm-")
+    seen = set()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not os.path.isdir(d):
+            continue
+        for n in sorted(os.listdir(d)):
+            if n == "helm" or n in seen:
+                continue
+            src = os.path.join(d, n)
+            if os.path.isfile(src) and os.access(src, os.X_OK):
+                seen.add(n)
+                try:
+                    os.symlink(src, os.path.join(shim, n))
+                except OSError:
+                    pass
+    return shim
+
+
 if HAVE_HELM:
+    _measured = _measure(["fixtures/bad-chart"])
     _quoted = re.findall(r"(\d{4,7}) bytes either way", PAGE_TXT["container.html"])
+    check("the container page's byte-identity figure is the measured report size",
+          _quoted == [str(_measured)],
+          "page says %s, measured %s" % (_quoted, _measured))
 else:
-    # the image always carries helm, so the helm-less host is the other figure
-    # the page names - the one it uses to explain why the comparison is pinned
+    check("SKIPPED on a helm-less host: the byte-identity figure is a helm-mode "
+          "figure and cannot be synthesised without helm", True)
+
+_shim = _path_without_helm()
+try:
+    _measured = _measure(["fixtures/bad-chart"],
+                         env=dict(os.environ, PATH=_shim))
     _quoted = re.findall(r"\((\d{4,7}) bytes\)", PAGE_TXT["container.html"])
-check("the container page's byte-identity figure is the measured report size",
-      _quoted == [str(len(_body))],
-      "page says %s, measured %d" % (_quoted, len(_body)))
+    check("the container page's helm-LESS byte figure is the measured report "
+          "size, on every host and not just a helm-less one",
+          _quoted == [str(_measured)],
+          "page says %s, measured %s" % (_quoted, _measured))
+finally:
+    shutil.rmtree(_shim, ignore_errors=True)
 
 # no page promises a published image
 check("no page tells the reader to pull a published image",

@@ -267,7 +267,14 @@ class ChartContext:
     # merely somewhere I do not look?" - which are different answers.
     subchart_docs: List[ManifestDoc] = field(default_factory=list)
     subchart_names: List[str] = field(default_factory=list)
-    assumed_java: Optional[str] = None   # from --assume-java
+    assumed_java: Optional[str] = None   # from --assume-java, IF APPLIED
+    # R15. What the operator TYPED, whether or not it was honoured. The
+    # two are different facts and only one of them was being recorded, so
+    # a chart with no JVM evidence printed "Java / JVM checks NOT RUN"
+    # without ever mentioning that the reader had just passed
+    # --assume-java and had it discarded. An explanation that does not
+    # read argv is the same defect as advice that does not read argv.
+    assume_java_requested: Optional[str] = None
     # from --measured: component key -> a number the USER measured. Anything
     # in here stops being an estimate (R9): it is OBSERVED, has zero width,
     # and cannot contribute to an UNDETERMINED memory verdict. Typed as
@@ -288,9 +295,39 @@ class ChartContext:
 
     @property
     def workloads(self) -> List[ManifestDoc]:
+        # R17. ReplicationController added, and it is the seventh copy of the
+        # kind list the whole R16/R17 fault family is about - the one that
+        # filters FIRST, so fixing the six downstream copies without this one
+        # would have left the ReplicationController chart exactly as blind as
+        # it was. Measured before the change, a chart whose only workload is a
+        # ReplicationController with a root container, no resources and no
+        # probes produced this and nothing else:
+        #
+        #     CH009 CH010 CH011 CH021 CH022 CH023 CH024 CH025 TP012 DF000
+        #
+        # No RS001, no RS011, no PB001, no SC001, no AV001. The entire
+        # pod-level rule surface was silent, because every one of those rules
+        # iterates this property. `kube.SCALABLE_KINDS` has listed
+        # ReplicationController as a first-class scalable workload since R16,
+        # and `scoring` scores its HPA category - so the tool held two
+        # contradictory opinions about whether the object existed.
+        #
+        # It did NOT report a false pass. `discovery` F9 sees zero workloads,
+        # sets ungradeable_reason and prints NOT GRADED, which is the honest
+        # answer to "I could not find a workload". It is the wrong answer to
+        # "there is a workload and I do not recognise it", and the reader
+        # cannot tell those apart from the output.
+        #
+        # Pod is deliberately still OUT. A bare Pod has no controller, so
+        # AV001's "replicas: 1 is zero redundancy" and AV010's PDB advice have
+        # no field to point at, and the rules that assume `spec.template`
+        # would need a second code path. That is a real gap, it is NOT fixed
+        # here, and pretending otherwise by adding the kind and letting the
+        # pod-level rules half-work is the failure mode this comment exists to
+        # prevent.
         return self.docs_of_kind(
             "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet",
-            "Job", "CronJob", "Rollout")
+            "ReplicationController", "Job", "CronJob", "Rollout")
 
     @property
     def hpas(self) -> List[ManifestDoc]:

@@ -9,7 +9,7 @@ from . import __version__
 from .kube import dockerfile_jvm_evidence, jvm_evidence
 from .models import AnalysisResult, Basis, Category, ProofTable, Severity
 from .renderplan import capability_gates
-from .scoring import (WEIGHTS, category_scores, coverage, grade,
+from .scoring import (WEIGHTS, category_scores, coverage, grade, overall_grade,
                       overall_score)
 
 WIDTH = 100
@@ -148,7 +148,10 @@ def score_qualifier_lines(result) -> List[str]:
     """
     lines: List[str] = []
     cov = coverage(result)
-    if not cov.complete:
+    # R16: all_scored, not complete. `complete` means "no blind spots", which
+    # a DaemonSet chart satisfies while its mean still runs over 85 weight
+    # points and not 100 - and the denominator is the whole point of this line.
+    if not cov.all_scored:
         lines.append(cov.one_line())
     mode = getattr(result.context, "render_mode", "static")
     if not mode.startswith("helm"):
@@ -289,17 +292,62 @@ def render_mode_paragraphs(ctx) -> List[str]:
     elif ctx.helm_error:
         out.append(
             f"helm IS installed - installing it again will not change this "
-            f"report. It ran and refused the chart: {ctx.helm_error}. "
-            f"The usual cause is that helm defaults to a v1.20.0 cluster "
-            f"(pkg/chartutil/capabilities.go) and enforces the chart's own "
-            f"kubeVersion against it. Re-run with an explicit "
-            f"--kube-version matching your cluster, e.g. "
-            f"`--kube-version 1.31.0`.")
+            f"report. It ran and refused the chart: {ctx.helm_error}."
+            + _helm_refusal_advice(ctx))
     else:
         out.append(
             "helm is installed but was not used for this run (--helm off, or "
             "no chart directory was found).")
     return out
+
+
+def _helm_refusal_advice(ctx) -> str:
+    """What to actually do about a helm render failure.
+
+    R15. This used to be one canned sentence appended to every refusal: "the
+    usual cause is that helm defaults to a v1.20.0 cluster ... re-run with an
+    explicit --kube-version matching your cluster, e.g. `--kube-version
+    1.31.0`". It was wrong in two different ways at once.
+
+    It was wrong when the refusal had nothing to do with kubeVersion - a
+    `required` on an unset value, a template syntax error, a missing subchart
+    - because it then explained a cause that was not the cause, and the reader
+    who follows advice about a diagnosis they were handed confidently is not
+    the one who made the mistake.
+
+    And it was wrong in the case it was written for. The version in the
+    example was interpolated from the run's own `--kube-version`, so a run
+    invoked with `--kube-version 1.31.0` ended with the tool telling its
+    operator to re-run with `--kube-version 1.31.0`. Advice generated without
+    reading the arguments it is advising about will eventually advise doing
+    the thing that was already done; here it did so in the one case where the
+    operator had done everything right and the CHART was at fault.
+    """
+    err = ctx.helm_error or ""
+    supplied = getattr(ctx, "kube_version_override", None)
+    is_kubeversion = "kubeVersion" in err and "incompatible" in err
+
+    if not is_kubeversion:
+        return (" That is not a kubeVersion problem - the message above names "
+                "the actual cause. Reproduce it directly with `helm template "
+                "release-name <chart>` and fix what it names; no flag of this "
+                "analyzer will change it.")
+
+    if supplied:
+        return (f" You already supplied `--kube-version {supplied}`, so this "
+                f"is not helm's default-cluster behaviour: the chart's own "
+                f"kubeVersion constraint genuinely excludes the cluster you "
+                f"named. Either that constraint is stale and should be widened "
+                f"in Chart.yaml, or this chart is not meant for a "
+                f"{supplied} cluster. This analyzer cannot decide which - but "
+                f"note that helm will refuse the real `helm install` for the "
+                f"same reason, so this is not a reporting artefact.")
+
+    return (" The usual cause is that helm defaults to a v1.20.0 cluster "
+            "(pkg/chartutil/capabilities.go) and enforces the chart's own "
+            "kubeVersion against it, so a chart requiring a newer cluster is "
+            "refused even though it is fine. Re-run with `--kube-version` set "
+            "to the version of the cluster you deploy to.")
 
 
 def stdout_summary(result: AnalysisResult, report_path: str,
@@ -315,10 +363,15 @@ def stdout_summary(result: AnalysisResult, report_path: str,
     if score is None:
         L.append("  RESULT: NOT GRADED (no analyzable chart input - see report)")
     else:
-        L.append(f"  GRADE {grade(score)}  ({score:.1f}/100)   "
+        g_capped, cap_why = overall_grade(result, score)
+        L.append(f"  GRADE {g_capped}  ({score:.1f}/100)   "
                  f"{counts[Severity.CRITICAL]} critical, "
                  f"{counts[Severity.HIGH]} high, "
                  f"{counts[Severity.MEDIUM]} medium, {counts[Severity.LOW]} low")
+        # The cap is never silent. A grade the reader cannot reconcile with
+        # the score beside it is worse than the uncapped grade was.
+        if cap_why:
+            L.append(_wrap(f"GRADE {cap_why}.", indent=2))
         # The denominator travels with the number. A score computed over
         # seven categories must not be readable as if it were computed over
         # ten - see scoring.py for the measured case where deleting a file
@@ -359,7 +412,11 @@ def render(result: AnalysisResult, target: str, external=None,
         result.findings,
         key=lambda f: (-f.severity.rank, -WEIGHTS[f.category], f.rule_id))
     score = overall_score(result)
-    g = grade(score) if score is not None else "-"
+    # R14. The OVERALL grade is capped by non-ASSUMED CRITICALs; the numeric
+    # score is not. See scoring.overall_grade for why the mean cannot see a
+    # single fatal finding, and why the label - not the arithmetic - is what
+    # gets corrected. Per-category grades below stay uncapped.
+    g, cap_why = overall_grade(result, score)
     counts = {s: sum(1 for f in findings if f.severity is s) for s in Severity}
 
     L: List[str] = []
@@ -450,6 +507,11 @@ def render(result: AnalysisResult, target: str, external=None,
         L.append(f"  [{'#' * bar}{'.' * (50 - bar)}]")
         cov = coverage(result)
         L.append("")
+        # Never silent. A grade the reader cannot reconcile with the number
+        # printed beside it is worse than the uncapped grade was.
+        if cap_why:
+            L.append(_wrap(f"GRADE {cap_why}.", indent=2))
+            L.append("")
         L.append(_wrap(
             f"What this number is: a weighted count of what THIS TOOL found. "
             f"Each category starts at 100 and loses points per finding. It is "
@@ -458,26 +520,47 @@ def render(result: AnalysisResult, target: str, external=None,
             f"because only the things the tool knows how to look for can "
             f"subtract.", indent=2))
         L.append("")
-        if cov.complete:
+        if cov.all_scored:
             L.append(f"  {'Computed over':<21} : all {cov.n_total} categories "
                      f"({cov.weight_total} of {cov.weight_total} weight points)")
         else:
             L.append(f"  {'Computed over':<21} : {cov.n_assessed} of "
                      f"{cov.n_total} categories ({cov.weight_assessed} of "
                      f"{cov.weight_total} weight points)")
-            L.append(f"  {'NOT assessed':<21} :")
-            for cat, reason in cov.unassessed:
-                L.append(_wrap(f"{cat.value} - {reason}", indent=6))
+            if cov.unassessed:
+                L.append(f"  {'NOT assessed':<21} :")
+                for cat, reason in cov.unassessed:
+                    L.append(_wrap(f"{cat.value} - {reason}", indent=6))
+            if cov.not_applicable:
+                L.append(f"  {'NOT applicable':<21} :")
+                for cat, reason in cov.not_applicable:
+                    L.append(_wrap(f"{cat.value} - {reason}", indent=6))
             L.append("")
-            L.append(_wrap(
+            # R16: the second sentence is about MISSING INPUT, and on a chart
+            # whose only exclusion is "not applicable" there is no missing
+            # input to add - saying so would send the reader looking for a
+            # file that cannot exist. The first and last sentences are true of
+            # both cases (the arithmetic is identical), so they always print.
+            comparability = (
                 "This score is therefore NOT comparable with a score computed "
-                "over a different set of categories. Adding the missing input "
-                "can move it in either direction, because the excluded "
-                "categories leave the numerator and the denominator together: "
-                "on one of this project's own fixtures, deleting the Dockerfile "
-                "RAISED the score by 4.4 points with every Kubernetes manifest "
-                "byte-identical. Compare runs only when these lists match.",
-                indent=2))
+                "over a different set of categories.")
+            if cov.unassessed:
+                comparability += (
+                    " Adding the missing input can move it in either "
+                    "direction, because the excluded categories leave the "
+                    "numerator and the denominator together: on one of this "
+                    "project's own fixtures, deleting the Dockerfile RAISED "
+                    "the score by 4.4 points with every Kubernetes manifest "
+                    "byte-identical.")
+            else:
+                comparability += (
+                    " The excluded categories left the numerator and the "
+                    "denominator together, which renormalises the rest - so "
+                    "the number above is a mean over what is left, not a mean "
+                    "over ten. No input would change that here; the exclusion "
+                    "is a property of the chart, not a gap in the run.")
+            comparability += " Compare runs only when these lists match."
+            L.append(_wrap(comparability, indent=2))
             L.append("")
         for line in score_qualifier_lines(result):
             if line.startswith("Evidence:"):
@@ -534,25 +617,41 @@ def render(result: AnalysisResult, target: str, external=None,
 
     # ----- scorecard (all levels) ------------------------------------------
     L.append(sec("Scorecard by category"))
+    cov = coverage(result)
+    # R16: three states, three cells. Both blank-score states used to print the
+    # same words, and one of them was a lie in the reader's favour - the tool
+    # HAD assessed HPA on a DaemonSet chart, completely, and the answer was
+    # "the question does not arise". Printing "not assessed" there tells a
+    # reader to go find input that does not exist.
+    na_cats = {c for c, _ in cov.not_applicable}
     rows = []
     for cat, cscore, cfind in category_scores(result):
         n_by_sev = ", ".join(
             f"{sum(1 for f in cfind if f.severity is s)}{s.label[0]}"
             for s in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM,
                       Severity.LOW) if any(f.severity is s for f in cfind)) or "-"
+        if cscore is None:
+            cell = "not applicable" if cat in na_cats else "not assessed"
+        else:
+            cell = f"{cscore:5.1f}"
         rows.append([
             cat.value,
-            "not assessed" if cscore is None else f"{cscore:5.1f}",
+            cell,
             "-" if cscore is None else grade(cscore),
             str(WEIGHTS[cat]),
             n_by_sev,
         ])
     L.append(_table(["Category", "Score", "Grade", "Weight", "Findings (C/H/M/L)"], rows))
-    cov = coverage(result)
     if cov.unassessed:
         L.append("")
         L.append("  Why a category is 'not assessed':")
         for cat, reason in cov.unassessed:
+            L.append(_wrap(f"{cat.value} - {reason}", indent=6))
+    if cov.not_applicable:
+        L.append("")
+        L.append("  Why a category is 'not applicable' (asked and answered, "
+                 "not skipped):")
+        for cat, reason in cov.not_applicable:
             L.append(_wrap(f"{cat.value} - {reason}", indent=6))
     # The pre-R5 wording here was "N/A categories are excluded, not free
     # points". True as far as it went, and it left the reader believing
@@ -569,7 +668,14 @@ def render(result: AnalysisResult, target: str, external=None,
                    "the rest, which is why the overall score above is "
                    "printed with the count it was computed over, and why two "
                    "scores are only comparable when those counts and these "
-                   "N/A rows match."))
+                   "N/A rows match. A 'not applicable' category leaves the "
+                   "mean by the same arithmetic and for a different reason: "
+                   "not that the tool could not look, but that the thing it "
+                   "would have scored cannot exist for this chart - an HPA "
+                   "has no scale subresource to attach to on a DaemonSet, and "
+                   "no edit to the chart would give it one. Scoring that 100 "
+                   "would have been a clean bill of health for a question "
+                   "never asked."))
 
     if level == "summary":
         # ----- compact top findings, then pointer --------------------------

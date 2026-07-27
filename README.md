@@ -11,7 +11,7 @@ HPA correctness, resource requests/limits, and — the part no other tool
 does — how the JVM will actually behave inside the container's cgroup.
 
 ```bash
-python3 hpa-analyzer.py ./my-service
+hpa-analyzer ./my-service
 #   GRADE F  (45.5/100)   11 critical, 11 high, 14 medium, 16 low
 #   Fix first:
 #     1. [HP004] HPA minReplicas > maxReplicas (invalid)  (templates/hpa.yaml)
@@ -189,6 +189,123 @@ version.
   means a genuinely dangling reference in an umbrella chart analysed without
   helm will *not* be flagged. That is a real loss, taken deliberately, and
   the coverage row says which claim went unchecked and how to settle it.
+* **The coverage gates have been wrong seven times, in both directions, and
+  there is now a backstop rather than a guarantee.** Deciding whether a
+  category is scoreable at all is the single most consequential thing this
+  tool does to a number, and it keeps getting it wrong: R8 scored
+  `DOCKERFILE` 100 on charts with no Dockerfile (a clean bill of health for
+  something never looked at); R11 did the same to `RESOURCES` when the values
+  were in an unread helper; R13 added a `CROSS` gate that read only the *base*
+  values file and therefore declared "not assessable" about a category holding
+  two `CRITICAL` findings raised under a values overlay — removing 14 weight
+  points of **real deductions** from the denominator and raising the score of
+  a chart with two critical cross-file faults. Since *R14b* a category that
+  actually lost points can never be dropped from the mean those points were
+  subtracted from, and when a gate disagrees with the findings the findings
+  win and the disagreement is printed to `stderr` (never as a finding — you
+  should not lose points because this tool contradicted itself). That is a
+  backstop over a class of bug with a demonstrated habit of recurring, not
+  evidence that the remaining gates are right. *R15* is the fourth instance and
+  arrived wearing a different hat: not a gate but a **workload-kind filter** in
+  `proofs._pairs()`, which quietly skipped Jobs, CronJobs and Argo Rollouts, so
+  a CronJob setting `-Xmx6g` under a `4Gi` limit scored `Cross-File
+  Consistency 100.0 / A+` and graded `A 95.9`. A filter and a gate are the same
+  line of code from the inside; the difference is only whether anything
+  downstream is told the skip happened. *R16* is the sixth (`checks_hpa._no_hpa`
+  returned silently on any chart whose workloads were not Deployments or
+  StatefulSets, and a category with no findings scores 100.0 — fifteen weight
+  points of `A+` for a question never asked). *R17* is the seventh, and it is
+  the one that says what the shape actually is: the same list of workload kinds
+  had been **re-typed by hand at eight separate call sites**, and the copies had
+  stopped agreeing. One chart per kind, each with `replicas: 3` and an HPA
+  naming it — the same `CRITICAL` mistake eight ways — scored `85.5 C` as a
+  Deployment or StatefulSet, `92.5 A-` as a ReplicaSet, `92.1 A-` as an Argo
+  Rollout, and `NOT GRADED` as a ReplicationController, which no rule in the
+  tool could see at all. Since `HP050` is a `CRITICAL` and R14 caps the overall
+  grade at `C` for one of those, what the ReplicaSet escaped was not mainly the
+  deduction — it was the cap. Seven of the eight sites are fixed against three
+  explicitly-named kind sets (`SCALABLE_KINDS`, `SCALE_CANDIDATE_KINDS`,
+  `REPLICA_MANAGED_KINDS` — three different questions, deliberately not merged);
+  the eighth is left in place because two constructed probes failed to reach it
+  and editing an unmeasured predicate is how this family started. **The lesson
+  to take from this bullet is not that seven bugs were fixed. It is that a
+  missing string in a tuple produces silence, and this tool scores silence as
+  100.0** — so read the category table and the coverage section, not the total.
+* **A flag the tool accepts is a promise it will act on it, and *R15* found
+  four places it did not.** `--kube-version` was accepted and then ignored by
+  the deprecated-API ranking, which used the chart's own `kubeVersion` instead —
+  so a chart with an API removed in 1.22 was ranked `LOW` ("Nothing breaks
+  today") against a cluster the operator had explicitly named as 1.31, in the
+  same report where helm had already refused it. `--assume-java` was read as
+  stating both a version *and* the existence of a JVM, so `--assume-java 17` on
+  an nginx chart raised the score by filing Java findings against nginx. The
+  helm-refusal advice paragraph explained every refusal as a `kubeVersion`
+  problem and interpolated the run's own `--kube-version` into its example, so a
+  run invoked with `--kube-version 1.31.0` advised re-running with
+  `--kube-version 1.31.0`. And the HTML headline rendered the score with zero
+  decimals, printing `93/100` beside the letter `A-` for a chart the text report
+  scored 92.9, where 93 is exactly the `A` threshold. All four are fixed and
+  measured in `proof/p17_flagmatrix.py` (69 claims over the whole corpus plus
+  both fixtures — 37 targets — and the full flag surface). What this does
+  **not** establish is that the remaining flags are honoured everywhere —
+  `p17` compares runs of the same chart under different flags to each other,
+  which is the only method that catches a flag doing nothing, and it does not
+  cover every flag against every rule.
+* **`HPA` scores 94.0 / A at weight 15 on charts that have no HPA at all**,
+  which is 15% of the total decided by a single MEDIUM finding. Over the
+  thirty-five-chart corpus that 94.0 outranks fourteen of the twenty-six charts
+  that actually implement autoscaling, because `HP030` (no `behavior` block)
+  fires on 25 of the 26 and pins their practical ceiling at 97.0. Whether that
+  ordering is wrong is a calibration argument with two sides and R16 produced no
+  measurement that settles it, so the number was deliberately left alone —
+  changing a weight because a distribution looks wrong is how a scoring model
+  stops meaning anything. What R16 *did* fix is the case underneath it: charts
+  the tool never asked the question about at all now say so instead of scoring
+  100. Read the category table, not the total.
+* **Five rules fire on nearly every corpus chart** — `AV010`, `SC001`, `SC002`,
+  `PB004`, `PB005` — and earlier versions of this README listed that as a
+  possible calibration fault. **An ablation settled it against that reading, and
+  the bullet is corrected rather than deleted.** Charts `c31`–`c35` each fix
+  exactly one family and leave the rest of the chart ordinary; every family goes
+  silent when and only when its own fix is applied (`SC001`/`SC002` on `c31`,
+  `PB004`/`PB005` on `c32`, `AV010` on `c34`, all five on `c35`), and `c35` —
+  which fixes all four families and keeps one real heap bug — still reports the
+  heap bug at full weight. So the five are discriminators, not a constant
+  offset, and their hit rate is a property of a corpus written to trip rules.
+  What that does **not** license is reading a low score as "sloppy chart": these
+  five are cheap to satisfy and satisfying them moves the number a long way.
+* **The thirty-five-chart corpus is synthetic and written by the same author as
+  the analyzer.** `proof/corpus_charts.py` builds charts to exercise specific
+  JVM and HPA shapes; `proof/p14_corpus.py` runs each one with **no flags**,
+  the way most people will run it, and `proof/p17_flagmatrix.py` runs the
+  corpus plus both fixtures across every flag. That is a useful instrument and
+  it has now found nine real defects (R13's empty-category score, R14's grade
+  contradiction, R14b's gate, and R15's six), but a corpus written against a
+  tool's own model shares that model's blind spots by construction.
+
+  R18 stopped describing that blind spot and measured it. Across all
+  thirty-five charts the census is **33 Deployments, 1 StatefulSet, 1 CronJob,
+  and zero** ReplicaSet, ReplicationController, Rollout, DaemonSet or Job. It
+  is a Deployment monoculture, which is why R16's and R17's defects both had to
+  be found by hand-built one-off charts rather than by the corpus — and why the
+  probe defect R18 fixed survived it too: the one CronJob in the corpus
+  declares no probes at all, so the rules that had been wrongly skipped had
+  nothing to fire on. Measured after the fix: **zero of the thirty-five charts
+  changed by a single point.**
+
+  (An earlier version of this bullet said no corpus chart "deploys a workload
+  that cannot be autoscaled". The census refutes it — `c22-cronjob-hpa` does.
+  What was true is narrower: no chart deploys an unscalable workload *without*
+  an HPA, which is the shape R16 needed. The corrected sentence is the measured
+  one.)
+
+  The response is `proof/chartgen.py` and `proof/p20_kindsweep.py`: charts
+  **generated** over a kind × shape space (8 kinds, then a pairwise covering
+  array over six axes → 45 charts) and compared by two mechanical oracles that
+  contain no list of Kubernetes kinds and no rule ID. It found the ninth
+  inline-kind-list defect by itself, and it fires five rules the thirty-five
+  hand-written charts never reached. It does not make the hand-written corpus
+  less synthetic; it makes the corpus stop being the only witness.
 
 ### Do not assume
 
@@ -202,10 +319,14 @@ version.
 * **Absence of a finding is not proof of correctness.** It can mean "not
   covered." Read the coverage section.
 * **The proof-table numbers are arithmetic on estimates, not measurements.**
-* **A finding's severity accounts for the cluster version *your chart
-  declares*, and nothing else about your cluster.** Deprecated-API severity is
-  reconciled against `kubeVersion` (R3). Namespace LimitRange/quota and
-  metrics setup are invisible and are not in any severity, so a "no requests"
+* **A finding's severity accounts for one cluster version and nothing else
+  about your cluster.** Deprecated-API severity is reconciled against
+  `kubeVersion` (R3) — or, since *R15*, against `--kube-version` when you pass
+  it, because the chart's `kubeVersion` is a claim the chart makes about itself
+  while the flag is a statement about the world by someone who can see the
+  cluster. Where the two disagree the flag wins and the report says so in the
+  finding rather than switching silently. Namespace LimitRange/quota and
+  metrics setup are still invisible and are in no severity, so a "no requests"
   finding may be defaulted away by a LimitRange the tool cannot see.
 * **The external-validator output is not ours.** `--cross-check` runs those
   tools and reports their output verbatim; we do not vouch for it.
@@ -214,9 +335,13 @@ version.
   no longer skips the JVM checks wholesale — heap-vs-limit arithmetic needs
   only the flags and the limit, and runs without it. What degrades is the
   version-dependent subset (8u131 / 8u191 / 8u372 / 11.0.16 cgroup
-  behaviour), and the report says which. Note also that this flag asks *you*
-  for something usually sitting in your repo (`pom.xml`, `build.gradle`,
-  `.java-version`); reading it instead is queued, not done.
+  behaviour), and the report says which. Since *R15* the flag states a
+  **version**, not the existence of a runtime: on a chart with no JVM evidenced
+  anywhere, `--assume-java 17` is declined and the coverage section says why,
+  because obeying it filed Java findings against an nginx chart and *raised*
+  its score. Note also that this flag asks *you* for something usually sitting
+  in your repo (`pom.xml`, `build.gradle`, `.java-version`); reading it instead
+  is queued, not done.
 * **Running it in the container makes the answer reproducible, not correct.**
   The image pins helm 3.16.4 and three validators; if your cluster runs a
   different Helm, the pinned render is reproducibly the wrong one and the tool
@@ -238,58 +363,68 @@ section, and the "Verify on your cluster" commands are for.
 
 ## Requirements
 
-* Python 3.8+ and PyYAML (`pip install -r requirements.txt`)
-* **Recommended:** `helm` on PATH → the chart is rendered by the real
-  template engine (`helm template`) instead of statically scrubbed.
-* **Alternative to both:** `docker` (or `podman` / `nerdctl`) and
-  `bin/hpa-analyzer`, which runs a build with the whole toolchain pinned —
-  see *Or run it from a container* below.
+`docker` (or `podman` / `nerdctl`). That is the list.
+
+You do not install Python, PyYAML or helm to use this tool, and as of *R12*
+you cannot run it without the container — `python3 -m hpaanalyzer` exits 2
+with a refusal. The reason is not neatness. **This tool's answer is a function
+of what is on your `PATH`**, which is measured rather than asserted: with
+`helm` absent the same chart's report changes its `Analysis mode` from `helm
+(rendered truth)` to `static`, rewrites every row of the coverage table,
+drops whole categories out of the score's denominator, changes the grade, and
+rewords a finding. Both runs are honest. Neither is comparable to the other,
+which makes the number useless for a review or a CI gate — the two things it
+is for.
+
+The image pins helm, kubeconform, kube-score and polaris at fixed versions so
+that stops happening. While running it natively stayed equally documented, the
+image was optional, so it went unused, so the grades stayed incomparable. A
+reproducibility mechanism nobody is required to use is decoration.
+
+(Changing the analyzer itself is a different job with different rules — see
+[docs/DEVELOPING.md](docs/DEVELOPING.md).)
 
 ## Getting started
 
-1. Install the one dependency (add `--break-system-packages` on Debian/Ubuntu
-   if pip refuses):
+1. Build the image once. It fetches the four pinned binaries and proves each
+   one executes before shipping it:
 
    ```bash
-   pip install -r requirements.txt
+   docker build -f docker/Dockerfile -t hpa-analyzer:latest .
    ```
 
-2. Run it against the directory that holds your chart (and, ideally, the
+2. Put the wrapper on your `PATH`:
+
+   ```bash
+   install -m 0755 bin/hpa-analyzer /usr/local/bin/hpa-analyzer
+   ```
+
+3. Run it against the directory that holds your chart (and, ideally, the
    service Dockerfile). You do **not** place files anywhere special — you pass
    **one directory** and the tool walks it:
 
    ```bash
-   python3 hpa-analyzer.py /path/to/your/service
+   hpa-analyzer /path/to/your/service
    ```
 
-3. **Read the answer in your terminal.** The run prints the grade, the counts,
+4. **Read the answer in your terminal.** The run prints the grade, the counts,
    and the ranked *fix-first* list to stdout — the full report is written to
    `hpa_analysis_report.txt` (`-o` to change) for the deep dive; add `--html`
    for a browsable version.
 
-First time? Run `python3 hpa-analyzer.py <dir> --check` to confirm the tool
-found your chart/values/Dockerfile before analyzing.
+First time? Run `hpa-analyzer <dir> --check` to confirm the tool found your
+chart/values/Dockerfile before analyzing.
 
-### Or run it from a container, with the toolchain pinned
-
-The report you get depends on what is on your `PATH` — with `helm` absent the
-same chart's `Analysis mode` drops from `helm (rendered truth)` to `static`,
-every coverage row changes, and one finding is reworded. Two people on the same
-commit can therefore exchange different reports and both be right. If you care
-about that, run the containerised build instead:
-
-```bash
-docker build -f docker/Dockerfile -t hpa-analyzer:latest .
-install -m 0755 bin/hpa-analyzer /usr/local/bin/hpa-analyzer
-
-hpa-analyzer /path/to/your/service --fail-on high
-```
+### What the wrapper is
 
 `bin/hpa-analyzer` is a bash wrapper around `docker run`, and the whole point
 of it is that you should not have to know that: every flag works unchanged, the
 exit codes are the analyzer's own, and the report is **byte-identical** to the
-native one — 62704 vs 62704 bytes on the test fixture, absolute paths included
-— because every host path is mounted at its own path. On first run it asks once
+one the module produces when run directly — 63078 vs 63078 bytes on the test
+fixture, absolute paths included — because every host path is mounted at its
+own path. That comparison is how the wrapper was shown to add nothing and hide
+nothing; it is a measurement taken during development, not a second supported
+way to run the tool. On first run it asks once
 where reports should go and remembers the answer in
 `~/.config/hpa-analyzer/config`, re-exposed as `$HPA_ANALYZER_OUTPUT_DIR`; that
 sets the **default** only, and an explicit `-o`/`--json`/`--html` always wins.
@@ -301,7 +436,8 @@ Two caveats you should read before trusting it, both stated in full in
 an image assembled locally rather than the real pinned build, so it proves the
 *wrapper* transparent and says nothing about whether helm 3.16.4 agrees with
 your helm; and `--cross-check` output is not reproducible run to run **even
-natively**, because the tools it quotes iterate Go maps.
+inside the image**, because the tools it quotes iterate Go maps. Pinning the
+toolchain fixes which binaries answer, not the order they answer in.
 
 ### How much detail? (verbosity)
 
@@ -367,14 +503,14 @@ says so on every surface (see *What the grade is*).
 ## Usage
 
 ```bash
-python3 hpa-analyzer.py ./svc --assume-java 8u151          # base-image tag hides the JDK
-python3 hpa-analyzer.py ./svc --fail-on high --json out.json   # CI gate
-python3 hpa-analyzer.py ./svc --min-score 70 --require-coverage  # score gate that can't be dodged by deleting an input
-python3 hpa-analyzer.py ./svc --helm on|off                # force / forbid helm rendering
-python3 hpa-analyzer.py ./svc --check                      # guided input check, no analysis
-python3 hpa-analyzer.py ./svc --cross-check                # also run helm lint / kubeconform / kube-score / polaris
-python3 hpa-analyzer.py ./svc --html                       # + browsable HTML report
-python3 hpa-analyzer.py ./svc --measured metaspace=210Mi,threads=180  # settle an UNDETERMINED JVM fit with real NMT numbers
+hpa-analyzer ./svc --assume-java 8u151          # base-image tag hides the JDK
+hpa-analyzer ./svc --fail-on high --json out.json   # CI gate
+hpa-analyzer ./svc --min-score 70 --require-coverage  # score gate that can't be dodged by deleting an input
+hpa-analyzer ./svc --helm on|off                # force / forbid helm rendering
+hpa-analyzer ./svc --check                      # guided input check, no analysis
+hpa-analyzer ./svc --cross-check                # also run helm lint / kubeconform / kube-score / polaris
+hpa-analyzer ./svc --html                       # + browsable HTML report
+hpa-analyzer ./svc --measured metaspace=210Mi,threads=180  # settle an UNDETERMINED JVM fit with real NMT numbers
 ```
 
 Exit codes: `0` ok · `1` a gate failed (`--fail-on` / `--min-score` /
@@ -385,8 +521,8 @@ not it passed.
 Try the fixtures:
 
 ```bash
-python3 hpa-analyzer.py fixtures/bad-chart  -o bad.txt    # scores F
-python3 hpa-analyzer.py fixtures/good-chart -o good.txt   # scores A+
+hpa-analyzer fixtures/bad-chart  -o bad.txt    # scores F
+hpa-analyzer fixtures/good-chart -o good.txt   # scores A+
 ```
 
 ## What the grade is — and the three ways it will mislead you
@@ -397,8 +533,27 @@ a measurement of anything. Ten categories carry fixed weights that add to 100
 (`RESOURCES` 15, `CHART` 4, …); each category starts at 100 and findings
 subtract from it; the overall score is the weighted mean.
 
-Three consequences, all of them measured against the fixtures in this repo
-(`proof/p5_grade.py`, `proof/p5b_bar2.py` — run them):
+**One way it used to mislead you, fixed in *R14*: the letter is now capped by
+certain failures, and the number is not.** A weighted mean cannot see a single
+fatal fact — dilution across nine healthy categories is the mechanism by which
+it disappears. The corpus run found `-Xmx3g` inside a `limits.memory: 2Gi`,
+filed `XF001` at `CRITICAL` with basis `OBSERVED`, said in its own prose that
+the container would be OOM-killed under first real load, and printed
+`GRADE: B+` on the front page of the same report. Any non-`ASSUMED` `CRITICAL`
+now caps the **overall** grade at `C`. The score is left exactly as it was,
+because bending a measurement to fix a label corrupts the measurement — so
+expect to see `GRADE: C (87.8/100)`, and expect the report to tell you why, on
+every surface including `--quiet` (`grade C CAPPED`) and `--json`
+(`grade`, `grade_uncapped`, `grade_cap_reason`). `ASSUMED` criticals do not
+cap: their deduction is already limited, and a cap firing where the deduction
+does not would make one finding weigh two different amounts in two places.
+Per-category grades are **not** capped, so the fatal category is still
+identifiable. The cost of this is that the letter is coarse — one critical and
+five criticals both read `C`, and only the number beside it separates them.
+
+Three consequences that remain, all of them measured against the fixtures in
+this repo (`proof/p5_grade.py`, `proof/p5b_bar2.py`, `proof/p16_gradecap.py` —
+run them):
 
 **1. The denominator moves, so two scores are not automatically comparable.**
 A category that cannot be assessed — no Dockerfile, no parseable workload —
@@ -472,16 +627,27 @@ the report's scorecard for the full per-category breakdown.
 
 ## Development
 
+Changing the analyzer is the one job that does not go through the container,
+and it has its own page: **[docs/DEVELOPING.md](docs/DEVELOPING.md)** — why the
+command refuses to run natively, why the *library* is deliberately not
+guarded, the documented escape hatch the proof scripts use (and why the
+refusal message does not print it), and the two rules that are easiest to get
+wrong when adding a check.
+
 ```bash
-python3 -m unittest discover -s tests -t .     # 427 tests
+python3 -m unittest discover -s tests -t .     # 516 tests
 python3 proof/p5_grade.py                      # each proof/p*.py exits 0 or explains why not
 ```
 
 `-t .` is not optional: `discover -s tests` on its own loads the test modules
-as top-level names, and the five that use `from .util import …` then fail with
+as top-level names, and the nine that use `from .util import …` then fail with
 `attempted relative import with no known parent package` while the run reports
-243 tests instead of 412. That is a discovery-root artefact, not a regression —
-worth knowing before you go looking for a bug that is not there.
+265 tests instead of 516. That is a discovery-root artefact, not a regression —
+worth knowing before you go looking for a bug that is not there. (Those three
+numbers were `five`, `243` and `412` until *R17* re-measured them; they were
+correct when written and nobody re-ran the wrong command afterwards to notice
+that the *number of modules doing the failing* had itself grown. A figure in a
+README is a measurement with no test on it.)
 
 `proof/p10_harness.py` checks the container wrapper. Its argument-scan and
 output-directory claims run anywhere (they use `HPA_ANALYZER_DRY_RUN=1` and

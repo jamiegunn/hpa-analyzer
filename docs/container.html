@@ -29,10 +29,13 @@
 <h1>Running it from a container</h1>
 
 <p class="lede"><code>bin/hpa-analyzer</code> is a shell wrapper around <code>docker run</code>. The point of it
-is that you should not have to know that. <code>hpa-analyzer --fail-on high ./svc</code> and
-<code>python3 -m hpaanalyzer --fail-on high ./svc</code> are meant to produce the same report text,
-print the same terminal summary, and exit with the same code — with only the toolchain
-underneath pinned.</p>
+is that you should not have to know that. <code>hpa-analyzer --fail-on high ./svc</code> is meant to
+produce the same report text, the same terminal summary and the same exit code as the module
+it wraps — with only the toolchain underneath pinned. That equivalence was established by
+running both and diffing them, which is why the module form appears on this page at all; it
+is no longer a way to run the tool. <code>python3 -m hpaanalyzer</code> exits <span class="exit">2</span>
+with a message pointing at the wrapper, for the reasons on the
+<a href="index.html">start page</a>.</p>
 
 <div class="toc">
   <p>On this page</p>
@@ -184,9 +187,10 @@ was expected, is passed straight through, because the analyzer already reports b
 message from the shell would substitute this script's wording and this script's exit code for
 the tool's.</p>
 
-<p>It does not turn an empty argv into <code>--help</code>. <code>python3 -m hpaanalyzer</code> with no arguments
-is an argparse usage error that exits <span class="exit">2</span>. A wrapper answering the same
-input with help text and exit 0 has turned a failing command into a passing one. For the same
+<p>It does not turn an empty argv into <code>--help</code>. Inside the image, an empty argv reaches
+argparse untouched and is a usage error that exits <span class="exit">2</span>. A wrapper
+answering the same input with help text and exit 0 has turned a failing command into a
+passing one. For the same
 reason there is no <code>CMD</code> in the Dockerfile: <code>CMD ["--help"]</code> is the obvious friendly
 default and it was measured to break this contract.</p>
 
@@ -258,10 +262,10 @@ appended. Mounts are deduplicated, read-write wins over read-only for the same p
 <code>--help</code>/<code>--version</code>/bare mount nothing. The precedence chain is exercised end to end,
 including the real first-run prompt driven over a real controlling terminal via
 <code>pty.fork()</code>. And the one that matters most: an analyzer report is byte-identical native
-versus containerised — 62704 bytes either way, terminal summary included — with ten exit-code
+versus containerised — 63078 bytes either way, terminal summary included — with ten exit-code
 rows matching native, including the four ways to exit 2. That figure is a helm-mode run; the
 identity is what was measured, not the size, and a host with no <code>helm</code> produces a longer
-report (63410 bytes) natively while the image always has helm. That difference is the reason the
+report (63754 bytes) natively while the image always has helm. That difference is the reason the
 comparison is run <em>native-with-helm</em> against <em>container</em> rather than however the host
 happens to be configured.</p>
 

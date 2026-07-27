@@ -24,17 +24,29 @@
 # a human to run. The only subprocess calls in the whole package are helm
 # (helmrender.py) and the cross-check tools (external.py).
 
+# Bump these deliberately, never implicitly. A toolchain change can move a
+# report's findings, so it is a versioned decision - see docs/DOCKER.md.
+#
+# They sit ABOVE the first FROM, in global scope, because stage 2 needs them
+# too (it stamps them into /etc/hpa-analyzer-image). A bare `ARG HELM_VERSION`
+# inside a stage inherits a GLOBAL default but not another stage's; declared
+# per-stage, stage 2 would read empty on any build without --build-arg and the
+# marker would record `helm=` while the image contained 3.16.4. A provenance
+# file that is silently blank is worse than none.
+ARG HELM_VERSION=3.16.4
+ARG KUBECONFORM_VERSION=0.6.7
+ARG KUBE_SCORE_VERSION=1.20.0
+ARG POLARIS_VERSION=9.6.4
+
 # ---------------------------------------------------------------------------
 # stage 1: fetch the pinned toolchain
 # ---------------------------------------------------------------------------
 FROM python:3.12-slim AS tools
 
-# Bump these deliberately, never implicitly. A toolchain change can move a
-# report's findings, so it is a versioned decision - see docs/DOCKER.md.
-ARG HELM_VERSION=3.16.4
-ARG KUBECONFORM_VERSION=0.6.7
-ARG KUBE_SCORE_VERSION=1.20.0
-ARG POLARIS_VERSION=9.6.4
+ARG HELM_VERSION
+ARG KUBECONFORM_VERSION
+ARG KUBE_SCORE_VERSION
+ARG POLARIS_VERSION
 
 # Set by BuildKit automatically (amd64 / arm64). Every one of these projects
 # publishes both, so an Apple Silicon build gets native binaries rather than
@@ -100,6 +112,32 @@ RUN apt-get update \
 RUN pip install --no-cache-dir "PyYAML>=5.4"
 
 COPY hpaanalyzer/ /opt/hpa-analyzer/hpaanalyzer/
+
+# The marker __main__._require_image() looks for. Without it the module
+# refuses to run, which is the whole point: a report is only comparable
+# between two people if the four binaries above are the same two binaries,
+# and the only place that is guaranteed is in here.
+#
+# It records the pinned versions rather than being an empty touch-file, so a
+# report that looks wrong can be traced to a toolchain: `docker run
+# --entrypoint cat <image> /etc/hpa-analyzer-image` says exactly what
+# produced it. Nothing parses this content - the guard is an existence check
+# - so the format is for humans and may change.
+#
+# It is written world-readable on purpose. The wrapper passes --user, so the
+# process reading it is an arbitrary uid with no /etc/passwd entry.
+ARG HELM_VERSION
+ARG KUBECONFORM_VERSION
+ARG KUBE_SCORE_VERSION
+ARG POLARIS_VERSION
+RUN printf '%s\n' \
+      "hpa-analyzer container image" \
+      "helm=${HELM_VERSION}" \
+      "kubeconform=${KUBECONFORM_VERSION}" \
+      "kube-score=${KUBE_SCORE_VERSION}" \
+      "polaris=${POLARIS_VERSION}" \
+      > /etc/hpa-analyzer-image \
+ && chmod 0444 /etc/hpa-analyzer-image
 
 ENV PYTHONPATH=/opt/hpa-analyzer \
     PYTHONDONTWRITEBYTECODE=1 \

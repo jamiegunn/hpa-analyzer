@@ -16,7 +16,7 @@ from .clusterprobes import build_probes
 from .kube import jvm_evidence
 from .models import AnalysisResult, Basis, Severity
 from .report import _education, undetermined_fit_lines
-from .scoring import (WEIGHTS, category_scores, coverage, grade,
+from .scoring import (WEIGHTS, category_scores, coverage, grade, overall_grade,
                       overall_score)
 
 _SEV_COLOR = {
@@ -40,7 +40,9 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
         result.findings,
         key=lambda f: (-f.severity.rank, -WEIGHTS[f.category], f.rule_id))
     score = overall_score(result)
-    g = grade(score) if score is not None else "-"
+    # R14. Overall grade only; the per-category grades further down stay
+    # uncapped. See scoring.overall_grade.
+    g, cap_why = overall_grade(result, score)
     counts = {s: sum(1 for f in findings if f.severity is s) for s in Severity}
     chart = ctx.chart if isinstance(ctx.chart, dict) else {}
 
@@ -52,16 +54,27 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
     P.append("</head><body>")
 
     # ---- header ----------------------------------------------------------
-    badge_color = ("#2e7d32" if score is not None and score >= 80 else
+    # A green badge carrying the letter C is its own contradiction, so when the
+    # grade is capped the colour follows the cap rather than the score. The
+    # colour is a restatement of the letter, and the letter is what changed.
+    badge_color = ("#b3261e" if cap_why else
+                   "#2e7d32" if score is not None and score >= 80 else
                    "#c25e00" if score is not None and score >= 60 else
                    "#b3261e" if score is not None else "#5f6368")
     P.append("<header>")
     cov = coverage(result)
     # The badge is the one element a reader will screenshot and paste into a
     # ticket, so the denominator has to be ON it, not two sections below.
+    # R15: one decimal, not zero. `{score:.0f}` printed 93/100 next to the
+    # letter A- for a chart the text report scored 92.9 - and 93 is exactly the
+    # A threshold, so the first thing a human read was a document contradicting
+    # itself about which grade it had awarded. The rounding was not even
+    # internally consistent: the per-category cells below this badge have
+    # always rendered one decimal. A grade boundary is a cliff, and no display
+    # convention gets to round a number across one.
     badge_sub = ("" if score is None else
-                 f"{score:.0f}/100" if cov.complete else
-                 f"{score:.0f}/100 &middot; {cov.n_assessed}/{cov.n_total} cats")
+                 f"{score:.1f}/100" if cov.all_scored else
+                 f"{score:.1f}/100 &middot; {cov.n_assessed}/{cov.n_total} cats")
     P.append(f"<div class=grade style='background:{badge_color}'>"
              f"{'NOT GRADED' if score is None else g}<span>"
              f"{badge_sub}</span></div>")
@@ -77,6 +90,9 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
         P.append(f"<span class=pill style='background:{_SEV_COLOR[s.label]}'>"
                  f"{counts[s]} {s.label.lower()}</span>")
     P.append("</div></div></header>")
+    if cap_why:
+        P.append(f"<p class=note style='color:#b3261e'><strong>Grade "
+                 f"{_e(cap_why)}.</strong></p>")
 
     # ---- controls / TOC --------------------------------------------------
     P.append("<div class=controls>")
@@ -132,6 +148,7 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
 
     # ---- scorecard -------------------------------------------------------
     P.append("<section id=scorecard><h2>Scorecard</h2>")
+    _na_cats = {c for c, _ in cov.not_applicable}
     rows = []
     for cat, cscore, cfind in category_scores(result):
         by = ", ".join(f"{sum(1 for f in cfind if f.severity is s)}{s.label[0]}"
@@ -139,7 +156,8 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
                                  Severity.MEDIUM, Severity.LOW)
                        if any(f.severity is s for f in cfind)) or "-"
         rows.append([cat.value,
-                     "not assessed" if cscore is None else f"{cscore:.1f}",
+                     ("not applicable" if cat in _na_cats else "not assessed")
+                     if cscore is None else f"{cscore:.1f}",
                      "-" if cscore is None else grade(cscore),
                      str(WEIGHTS[cat]), by])
     P.append(_html_table(["Category", "Score", "Grade", "Weight", "C/H/M/L"],
@@ -149,15 +167,26 @@ def render_html(result: AnalysisResult, target: str, external=None) -> str:
         for cat, reason in cov.unassessed:
             P.append(f"<li>{_e(cat.value)} &mdash; {_e(reason)}</li>")
         P.append("</ul>")
-        P.append(f"<p class=note><b>{_e(cov.one_line())}</b> An unassessed "
-                 "category is not scored 0 and not scored 100 &mdash; there is "
-                 "no honest number for 'not looked at' &mdash; so it leaves "
-                 "the weighted mean entirely, numerator and denominator "
-                 "together. That renormalises the rest: on one of this "
-                 "project's own fixtures, deleting the Dockerfile RAISED the "
-                 "score by 4.4 points with every Kubernetes manifest "
-                 "byte-identical. Compare this score only against runs whose "
-                 "assessed set matches.</p>")
+    # R16. Its own list under its own heading, because the claim is the
+    # opposite of the one above: the tool did not fail to look, it looked and
+    # the question turned out not to arise.
+    if cov.not_applicable:
+        P.append("<p class=note><b>Not applicable &mdash; asked and answered, "
+                 "not skipped:</b></p><ul>")
+        for cat, reason in cov.not_applicable:
+            P.append(f"<li>{_e(cat.value)} &mdash; {_e(reason)}</li>")
+        P.append("</ul>")
+    if cov.unassessed or cov.not_applicable:
+        P.append(f"<p class=note><b>{_e(cov.one_line())}</b> An excluded "
+                 "category is not scored 0 and not scored 100 &mdash; there "
+                 "is no honest number either for 'not looked at' or for a "
+                 "question that does not arise &mdash; so it leaves the "
+                 "weighted mean entirely, numerator and denominator together. "
+                 "That renormalises the rest: on one of this project's own "
+                 "fixtures, deleting the Dockerfile RAISED the score by 4.4 "
+                 "points with every Kubernetes manifest byte-identical. "
+                 "Compare this score only against runs whose assessed set "
+                 "matches.</p>")
     P.append("<p class=note>The score is a weighted count of what this tool "
              "found, not an estimate of risk. Each category starts at 100 and "
              "loses points per finding (CRITICAL -25, HIGH -12, MEDIUM -6, "

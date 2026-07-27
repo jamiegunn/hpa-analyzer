@@ -6,7 +6,7 @@ from typing import Any
 from . import kubeversion as kv
 from .helmyaml import line_of, values_lookup
 from .kube import (API_AVAILABLE_SINCE, DEPRECATED_APIS, RECOMMENDED_LABELS,
-                   doc_name)
+                   doc_name, empty_values_resources_reach_a_container)
 from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
                      Severity)
 
@@ -492,8 +492,33 @@ def _values_files(ctx, result):
                  fix="Use IfNotPresent with immutable tags.")
 
         # empty resources block (the classic helm create default)
+        #
+        # VA004 reads a values key and concludes something about the PODS
+        # ("every pod is scheduled as BestEffort"). That inference needs a
+        # container that actually consumes .Values.resources. When every
+        # container sources its block from a named template instead, the
+        # values key is inert - helm renders whatever the define emits, and an
+        # empty `resources: {}` in values.yaml is dead weight, not a HIGH.
+        # Same defect class as RS001/RS011/HP022; see tests/test_helper_blindness.
         found, res = values_lookup(vals, "resources")
-        if found and (res is None or res == {}):
+        if found and (res is None or res == {}) and ctx.workloads \
+                and not empty_values_resources_reach_a_container(ctx):
+            _add(result, rule_id="VA011", severity=Severity.LOW,
+                 category=Category.CHART,
+                 title="values.yaml declares an empty resources block that no "
+                       "container uses", file=path,
+                 detail="'resources: {}' is present in values, but no "
+                        "container's resources come from it - every container "
+                        "either writes the block out or pulls it from a named "
+                        "template.",
+                 why="Not a scheduling defect - the pods get whatever the "
+                     "helper emits. It is a documentation defect: a reader "
+                     "tuning resources edits this key and nothing changes.",
+                 fix="Delete the key, or make the helper default from it "
+                     "(`.Values.resources`) so the values file means what it "
+                     "appears to mean.",
+                 basis=Basis.DERIVED)
+        elif found and (res is None or res == {}):
             _add(result, rule_id="VA004", severity=Severity.HIGH, category=Category.RESOURCES,
                  title="Empty resources block in values", file=path,
                  detail="'resources: {}' - no requests or limits are set.",
@@ -768,25 +793,86 @@ def _kube_version(ctx, result, c, f):
                  "so admits '-gke.N' and '-eks-N' builds.")
 
 
+class _Scope:
+    """The set of clusters an apiVersion finding is ranked against.
+
+    R15. There are two sources for "which clusters does this chart have to
+    work on", and before this change only the weaker one was ever consulted.
+
+    The chart's `kubeVersion` is a CLAIM the chart makes about itself. The
+    operator's `--kube-version` is a STATEMENT ABOUT THE WORLD: it names the
+    cluster they actually have. When the two disagree, the chart is the one
+    that is wrong - a chart cannot decide what version someone's cluster is.
+
+    Ranking deprecated APIs against the chart's own declaration produces the
+    inversion this class exists to remove: c17 declares `>=1.19.0-0 <1.21.0-0`
+    and ships a v1beta1 Ingress and PDB. Analysed at `--kube-version 1.31.0`
+    the tool used to report both at LOW with the words "Nothing breaks today",
+    in the same report in which helm had already refused to render the chart
+    against 1.31 at all. Both statements cannot be true. The operator asked
+    about 1.31; the answer must be about 1.31.
+
+    `declared` is kept alongside because the disagreement is itself worth
+    saying out loud, and because the fix differs: on the chart's own range the
+    remedy is to migrate the API, and where the operator's cluster is outside
+    that range the remedy is that plus fixing the constraint.
+    """
+
+    def __init__(self, ctx, declared):
+        self.declared = declared
+        self.operator = None
+        self.rng = declared
+        self.phrase = f"the chart's kubeVersion ({declared.raw})"
+        self.from_operator = False
+        ver = getattr(ctx, "kube_version_override", None)
+        if not ver:
+            return
+        v = kv.parse_version(str(ver))
+        if v is None:
+            return
+        self.operator = (v.major, v.minor)
+        self.rng = kv.DeclaredRange(raw=str(ver), parsed=True,
+                                    minors=((v.major, v.minor),))
+        self.phrase = f"the cluster you named (--kube-version {ver})"
+        self.from_operator = True
+
+    @property
+    def conflict(self):
+        """The named cluster is outside the range the chart claims to support."""
+        return (self.from_operator and self.declared.known
+                and not self.declared.includes(*self.operator))
+
+    def note(self):
+        if not self.conflict:
+            return ""
+        return (f" The chart's own kubeVersion ({self.declared.raw}) does not "
+                f"admit {kv.fmt_minor(self.operator)}, so helm will refuse to "
+                f"install it there until that constraint is corrected - but "
+                f"the constraint is the chart's opinion of your cluster, and "
+                f"you have stated otherwise, so this finding is ranked against "
+                f"the cluster.")
+
+
 def _api_versions(ctx, result):
     # ctx.chart may be a list or a bare scalar (CH012); a wrong-shaped
     # Chart.yaml must not turn a template check into a traceback.
     chart = ctx.chart if isinstance(ctx.chart, dict) else {}
     rng = kv.declared_range(chart.get("kubeVersion"))
+    scope = _Scope(ctx, rng)
     for doc in ctx.docs:
         if not doc.kind or not doc.api_version:
             continue
         key = (doc.api_version, doc.kind.lower())
         fact = DEPRECATED_APIS.get(key)
         if fact is not None:
-            _api_removed(ctx, result, doc, fact, rng)
+            _api_removed(ctx, result, doc, fact, scope)
         since = API_AVAILABLE_SINCE.get(key)
         if since is not None:
-            _api_too_new(ctx, result, doc, since, rng)
+            _api_too_new(ctx, result, doc, since, scope)
 
 
-def _api_removed(ctx, result, doc, fact, rng):
-    """TP010, reconciled against the chart's declared cluster range.
+def _api_removed(ctx, result, doc, fact, scope):
+    """TP010, reconciled against the cluster range in scope.
 
     Before R3 this was CRITICAL unconditionally. That made the fix-first list
     stop being an order: a chart pinned to 1.20-1.21 shipping a
@@ -795,7 +881,11 @@ def _api_removed(ctx, result, doc, fact, rng):
     the same severity as a chart pinned >=1.33 shipping batch/v1beta1 CronJob,
     which cannot work anywhere. Both are worth reporting. They are not worth
     reporting identically.
+
+    R15: the range in scope is the operator's `--kube-version` when they gave
+    one, and the chart's declaration otherwise. See `_Scope`.
     """
+    rng = scope.rng
     ln = line_of(ctx.template_raw.get(doc.file, ""),
                  r"apiVersion:\s*" + re.escape(doc.api_version))
     removed = kv.fmt_minor(fact.removed_in)
@@ -836,21 +926,32 @@ def _api_removed(ctx, result, doc, fact, rng):
     below = rng.below(*fact.removed_in)
 
     if above and not below:
+        if scope.from_operator:
+            why = (f"You named this cluster on the command line. The API server "
+                   f"at {kv.fmt_minor(scope.operator)} rejects this object "
+                   f"outright - `helm upgrade` fails, or succeeds partially and "
+                   f"leaves a release referencing a dead API. This is not a "
+                   f"portability note about clusters you might one day have; it "
+                   f"is about the one you said you have.")
+        else:
+            why = (f"This is not a portability note. On EVERY cluster this chart "
+                   f"claims to support the API server rejects the object, so the "
+                   f"chart passes helm's kubeVersion gate and then fails at apply "
+                   f"time. There is no cluster on which this chart works as "
+                   f"declared.")
         _add(result, rule_id="TP010", severity=Severity.CRITICAL,
              category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
-             detail=base + f" The chart's kubeVersion ({rng.raw}) admits "
+             detail=base + f" {scope.phrase.capitalize()} admits "
                            f"{rng.describe()} - every one of those is at or above "
-                           f"{removed}.",
-             why=f"This is not a portability note. On EVERY cluster this chart "
-                 f"claims to support the API server rejects the object, so the "
-                 f"chart passes helm's kubeVersion gate and then fails at apply "
-                 f"time. There is no cluster on which this chart works as "
-                 f"declared.",
-             fix=fix)
+                           f"{removed}." + scope.note(),
+             why=why,
+             fix=fix + (" Fixing the chart's kubeVersion alone would not help: "
+                        "it would only make helm refuse the install earlier."
+                        if scope.conflict else ""))
     elif above and below:
         _add(result, rule_id="TP010", severity=Severity.HIGH,
              category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
-             detail=base + f" The chart's kubeVersion ({rng.raw}) admits "
+             detail=base + f" {scope.phrase.capitalize()} admits "
                            f"{rng.describe()}, which straddles the removal: "
                            f"{kv.fmt_minor(below[0])}-{kv.fmt_minor(below[-1])} "
                            f"still serve this API, "
@@ -863,6 +964,18 @@ def _api_removed(ctx, result, doc, fact, rng):
              fix=fix + f" If migrating is not possible yet, narrowing kubeVersion "
                        f"below {removed} is a real fix and not a workaround: helm "
                        f"will then refuse the installs that would have failed.")
+    elif scope.from_operator:
+        _add(result, rule_id="TP010", severity=Severity.LOW,
+             category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
+             detail=base + f" {scope.phrase.capitalize()} is "
+                           f"{rng.describe()}, below {removed}, so this API "
+                           f"still exists there.",
+             why=f"On the cluster you named the API server still serves this "
+                 f"version, so nothing fails today. It remains an upgrade "
+                 f"blocker: that cluster will reach {removed} before this chart "
+                 f"can.",
+             fix=fix + f" Nothing breaks on {kv.fmt_minor(scope.operator)}; do "
+                       f"this before that cluster is upgraded.")
     else:
         _add(result, rule_id="TP010", severity=Severity.LOW,
              category=Category.TEMPLATES, title=title, file=doc.file, line=ln,
@@ -878,7 +991,7 @@ def _api_removed(ctx, result, doc, fact, rng):
                        "kubeVersion.")
 
 
-def _api_too_new(ctx, result, doc, since, rng):
+def _api_too_new(ctx, result, doc, since, scope):
     """TP013: the API is not old enough for the range the chart declares.
 
     The mirror image of TP010, and it did not exist before R3 even though
@@ -888,7 +1001,12 @@ def _api_too_new(ctx, result, doc, since, rng):
 
     Only fires when the declared range is known: with no kubeVersion there is
     no claim to contradict, and inventing one would be a guess.
+
+    R15: when the operator names a cluster, that is not a guess - it is the
+    strongest fact available, and it replaces the chart's claim as the thing
+    the apiVersion is checked against.
     """
+    rng = scope.rng
     if not rng.known:
         return
     missing = rng.below(*since)
@@ -900,6 +1018,26 @@ def _api_too_new(ctx, result, doc, since, rng):
     span = (f"{kv.fmt_minor(missing[0])}-{kv.fmt_minor(missing[-1])}"
             if missing[0] != missing[-1] else kv.fmt_minor(missing[0]))
     everywhere = len(missing) == len(rng.minors)
+    if scope.from_operator:
+        tail = (f" - the cluster you named does not have this API."
+                if everywhere else ".")
+        why = (f"You named this cluster on the command line and this API does "
+               f"not exist on it. The API server rejects the object at apply "
+               f"time with 'no matches for kind', leaving a half-applied "
+               f"release.")
+        fix_txt = (f"Use an apiVersion that exists on "
+                   f"{kv.fmt_minor(scope.operator)}, or deploy to a cluster at "
+                   f"{s} or later.")
+    else:
+        tail = (" - that is every version the chart claims to support."
+                if everywhere else ".")
+        why = (f"helm's kubeVersion gate passes, because the chart says it "
+               f"supports those clusters. Install therefore proceeds and the "
+               f"API server rejects the object at apply time with 'no matches "
+               f"for kind' - a half-applied release, which is the exact "
+               f"failure the kubeVersion field exists to prevent.")
+        fix_txt = (f'Raise the floor to at least ">={s}.0-0", or use an '
+                   f"apiVersion that exists on {kv.fmt_minor(rng.floor)}.")
     _add(result, rule_id="TP013",
          severity=Severity.CRITICAL if everywhere else Severity.HIGH,
          category=Category.TEMPLATES,
@@ -907,18 +1045,11 @@ def _api_too_new(ctx, result, doc, since, rng):
                f"({doc.kind})",
          file=doc.file, line=ln,
          detail=f"{doc.kind} '{doc_name(doc)}' uses apiVersion "
-                f"{doc.api_version}, which first exists in Kubernetes {s}. The "
-                f"chart's kubeVersion ({rng.raw}) admits {rng.describe()}, "
-                f"including {span} where this API is absent"
-                + (" - that is every version the chart claims to support."
-                   if everywhere else "."),
-         why=f"helm's kubeVersion gate passes, because the chart says it "
-             f"supports those clusters. Install therefore proceeds and the API "
-             f"server rejects the object at apply time with 'no matches for "
-             f"kind' - a half-applied release, which is the exact failure the "
-             f"kubeVersion field exists to prevent.",
-         fix=f'Raise the floor to at least ">={s}.0-0", or use an apiVersion '
-             f"that exists on {kv.fmt_minor(rng.floor)}.")
+                f"{doc.api_version}, which first exists in Kubernetes {s}. "
+                f"{scope.phrase.capitalize()} admits {rng.describe()}, "
+                f"including {span} where this API is absent" + tail
+                + scope.note(),
+         why=why, fix=fix_txt)
 
 
 def _labels(ctx, result):

@@ -42,6 +42,25 @@ intervening eight iterations introduced.
 """
 
 
+R11_PARENT = "49307d6"
+"""The commit immediately before R11, used ONLY as R11's no-regression control.
+
+p12_helpers.py needs two different BEFOREs and they answer two different
+questions. The DEFECT is measured against BASELINE, because that is where it
+shipped. The CONTROL - "nothing else moved" - cannot be measured there: ten
+iterations of deliberate change sit in between, so a whole-report comparison
+against BASELINE fails on every fixture for reasons that have nothing to do
+with helpers, and the only way to make it pass is to narrow it to the four
+rules R11 touches. That narrowing was measured and found to be worthless:
+not one fixture in the repo produces RS001, RS011, HP022 or VA004, so the
+comparison passed while being incapable of failing.
+
+Against the immediate parent the comparison is total - every rule, every
+score, every fixture - and a single unintended change anywhere in the program
+fails it. A control that can only pass is not a control.
+"""
+
+
 class BaselineMissing(RuntimeError):
     pass
 

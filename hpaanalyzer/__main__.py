@@ -1,13 +1,19 @@
 """CLI entry point.
 
-    python3 -m hpaanalyzer <directory> [options]
+    hpa-analyzer <directory> [options]
+
+The supported way to run this command is the container, through the
+`hpa-analyzer` wrapper in bin/. Running the module directly against whatever
+happens to be on the host's PATH is refused - see _require_image() below for
+why, and docs/DEVELOPING.md for the escape hatch this repo's own evidence
+layer uses.
 
 Exit codes (CI-gateable):
     0  analysis ran; no gate violated
     1  a gate was violated (--fail-on threshold hit, or score < --min-score,
        or --require-coverage with an unassessed category, or the input was
        ungradeable while a gate was requested)
-    2  usage / IO error
+    2  usage / IO / environment error (includes the refusal above)
 """
 
 import argparse
@@ -19,11 +25,20 @@ import sys
 # exits 1 - the SAME code as a failed quality gate - so CI cannot tell "tool
 # broken" from "chart failed". Fail fast with a clear message and exit 2 (usage
 # / environment error) before the engine import chain touches yaml.
+#
+# Seeing this at all means something is off: the image installs PyYAML at build
+# time, so a user running `hpa-analyzer` cannot reach it. It is reachable only
+# by an embedder importing the package, or by a contributor with the native
+# override set - so the message points at both of those, not at a pip line the
+# supported path never needed.
 try:
     import yaml  # noqa: F401
 except ImportError:
     print("error: PyYAML is required but not installed.\n"
-          "    pip install -r requirements.txt   (or: pip install PyYAML)",
+          "    the supported command is `./bin/hpa-analyzer <dir>`, which "
+          "carries its own\n"
+          "    dependencies - see docs/DEVELOPING.md if you are running the "
+          "package directly.",
           file=sys.stderr)
     raise SystemExit(2)
 
@@ -32,7 +47,7 @@ from .clusterprobes import build_probes as _cluster_probes
 from .engine import analyze
 from .models import Severity
 from .report import render
-from .scoring import coverage, grade, overall_score
+from .scoring import coverage, grade, overall_grade, overall_score
 
 _SEV_ORDER = ["none", "low", "medium", "high", "critical"]
 
@@ -220,13 +235,20 @@ def main(argv=None) -> int:
             return 2
 
     score = overall_score(result)
+    # R14. "grade" is the capped grade, because it is what the reports print
+    # and what a CI gate will branch on - a consumer that gated on an uncapped
+    # B+ while the human report said C would be the same lie in a new place.
+    # The raw band and the reason are both emitted so nothing is hidden.
+    _grade_capped, _grade_cap_why = overall_grade(result, score)
     _cov = coverage(result)
     if args.json_path:
         payload = {
             "target": target,
             "mode": ctx.render_mode,
             "score": round(score, 1) if score is not None else None,
-            "grade": grade(score) if score is not None else None,
+            "grade": _grade_capped if score is not None else None,
+            "grade_uncapped": grade(score) if score is not None else None,
+            "grade_cap_reason": _grade_cap_why,
             "graded": score is not None,
             # A consumer that reads "score" without reading this cannot tell
             # a 51.8 over 7 categories from a 51.8 over 10.
@@ -234,9 +256,19 @@ def main(argv=None) -> int:
                 "assessed": [c.name for c in _cov.assessed],
                 "unassessed": [{"category": c.name, "reason": r}
                                for c, r in _cov.unassessed],
+                # R16. A separate key, not a widening of "unassessed": a
+                # consumer parsing this JSON has already written code that
+                # treats every entry of that list as a blind spot to chase,
+                # and a category the tool answered completely does not belong
+                # in it. `complete` keeps its meaning (no blind spots) for the
+                # same reason; `all_scored` is the new, narrower claim that
+                # the mean ran over all ten categories.
+                "not_applicable": [{"category": c.name, "reason": r}
+                                   for c, r in _cov.not_applicable],
                 "weight_assessed": _cov.weight_assessed,
                 "weight_total": _cov.weight_total,
                 "complete": _cov.complete,
+                "all_scored": _cov.all_scored,
                 "note": _cov.one_line(),
             },
             "counts": {s.label.lower(): sum(1 for f in result.findings
@@ -287,9 +319,14 @@ def main(argv=None) -> int:
         # the exact string a reader would diff against another run, and two
         # runs over different category sets are not comparable (scoring.py).
         cov = coverage(result)
-        over = ("" if cov.complete
+        over = ("" if cov.all_scored
                 else f" over {cov.n_assessed}/{cov.n_total} categories")
-        score_str = (f"score {score:.1f}/100 (grade {grade(score)}){over}"
+        # The capped grade, and marked as capped. One line is exactly where a
+        # silent cap would do the most damage: it is the line that gets pasted
+        # into a ticket with nothing else around it.
+        capped = "" if not _grade_cap_why else " CAPPED"
+        score_str = (f"score {score:.1f}/100 (grade {_grade_capped}{capped})"
+                     f"{over}"
                      if score is not None else "NOT GRADED")
         print(f"hpa-analyzer [{ctx.render_mode}]: {score_str}, "
               f"{len(result.findings)} finding(s) -> {os.path.abspath(args.output)}")
@@ -341,16 +378,102 @@ def main(argv=None) -> int:
         # The note below puts that in the CI
         # log on every run, pass or fail; --require-coverage turns it into an
         # actual gate, because a log line does not stop a deploy.
-        if not _cov.complete:
+        if not _cov.all_scored:
+            advice = (" - pass --require-coverage to gate on this."
+                      if not _cov.complete else
+                      " - and --require-coverage will NOT fail on this, "
+                      "deliberately: there is no input anyone could add.")
             print(f"gate: {_cov.one_line()} A threshold compared against a "
                   f"score over a different set of categories is not the same "
-                  f"comparison - pass --require-coverage to gate on this.",
-                  file=sys.stderr)
+                  f"comparison{advice}", file=sys.stderr)
     if args.require_coverage and not _cov.complete:
         print(f"gate: --require-coverage: {_cov.one_line()}", file=sys.stderr)
         failed = True
     return 1 if failed else 0
 
 
+IMAGE_MARKER = "/etc/hpa-analyzer-image"
+"""File the Dockerfile writes into the runtime stage. Its presence is what
+`python3 -m hpaanalyzer` treats as "I am inside the pinned image".
+
+Deliberately a file at an absolute path outside the package, not an
+environment variable. An env marker is inherited by every child process, so a
+single `export` in a shell profile silently turns the guard off for that
+machine forever and nobody notices; a file has to be created on purpose.
+
+What this does NOT do, stated plainly so nobody builds on it: it is not a
+security boundary. Anyone who can write /etc can defeat it in one command,
+and that is fine - it is not defending the machine from its operator, it is
+stopping a reproducible-by-construction tool from being run irreproducibly by
+habit. See _require_image().
+"""
+
+NATIVE_OVERRIDE = "HPA_ANALYZER_ALLOW_NATIVE"
+"""Escape hatch for this repository's own tests and proof scripts.
+
+It exists because the evidence layer has to run the CLI as a real subprocess
+on a machine that has no docker daemon, and a proof that cannot run is worth
+less than the guard it was protecting.
+
+It is documented in docs/DEVELOPING.md and NOT printed in the refusal message.
+That is a deliberate asymmetry, not an oversight: a bypass printed in every
+user's terminal becomes the folk-standard way to run the tool within a week,
+and then the guard has cost everyone a line of typing and prevented nothing.
+"""
+
+
+def _require_image(argv=None, env=None, marker=IMAGE_MARKER) -> int:
+    """Return 0 if this process may proceed, or 2 after printing a refusal.
+
+    WHY THE COMMAND IS GUARDED AT ALL
+    ---------------------------------
+    This tool's answer is a function of what is on PATH, and that is measured,
+    not asserted: with helm absent the same chart's report changes its
+    `Analysis mode`, rewrites every row of the coverage table, drops whole
+    categories out of the score denominator, and rewords findings. Two people
+    running `python3 -m hpaanalyzer` on the same chart on two laptops get two
+    different grades and neither of them is wrong. The image pins helm,
+    kubeconform, kube-score and polaris precisely so that stops happening;
+    running the module natively opts out of the only thing that makes the
+    number comparable.
+
+    WHY IT GUARDS THE COMMAND AND NOT THE LIBRARY
+    ---------------------------------------------
+    This lives in the `__main__` block, so `main([...])` called in-process is
+    untouched. 20 tests do exactly that, and so does anyone embedding the
+    analyzer. The refusal is about the unsupported *entry point*, not about
+    the code; making the library refuse would break embedding to prevent a
+    mistake embedders are not making.
+    """
+    env = os.environ if env is None else env
+    if os.path.exists(marker):
+        return 0
+    if env.get(NATIVE_OVERRIDE) == "1":
+        return 0
+    argv = sys.argv[1:] if argv is None else argv
+    where = " ".join(argv) if argv else "<chart-directory>"
+    print(
+        "error: this module is not the supported entry point.\n"
+        "\n"
+        "    `python3 -m hpaanalyzer` analyzes your chart with whatever helm,\n"
+        "    kubeconform, kube-score and polaris happen to be on this host's\n"
+        "    PATH - or with none of them. That changes the analysis mode, the\n"
+        "    coverage table, which categories are scored at all, and the final\n"
+        "    grade. The same chart scores differently on two machines and\n"
+        "    neither run is wrong, which makes the number useless for review\n"
+        "    or for a CI gate. The image exists to pin that toolchain.\n"
+        "\n"
+        "run it through the wrapper instead - every flag is identical:\n"
+        f"    ./bin/hpa-analyzer {where}\n"
+        "\n"
+        "first time (builds the pinned image, once):\n"
+        "    docker build -t hpa-analyzer:local -f docker/Dockerfile .\n"
+        "\n"
+        "working on the analyzer itself?  see docs/DEVELOPING.md",
+        file=sys.stderr)
+    return 2
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _refused = _require_image()
+    raise SystemExit(_refused or main())

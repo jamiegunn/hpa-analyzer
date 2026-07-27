@@ -1,12 +1,20 @@
 # Running hpa-analyzer from a container
 
 `bin/hpa-analyzer` is a shell wrapper around `docker run`. The point of it is
-that you should not have to know that. `hpa-analyzer --fail-on high ./svc` and
-`python3 -m hpaanalyzer --fail-on high ./svc` are meant to produce the same
-report text, print the same terminal summary, and exit with the same code —
-with only the toolchain underneath pinned. This file records why the container
-exists at all, what the wrapper does to keep that promise, what was measured,
-and the two things it does **not** establish.
+that you should not have to know that. `hpa-analyzer --fail-on high ./svc` is
+meant to produce the same report text, the same terminal summary and the same
+exit code as the module it wraps — with only the toolchain underneath pinned.
+
+That equivalence was established by running both and diffing them, which is why
+the module form appears in this file at all. It is no longer a way to run the
+tool: as of *R12* `python3 -m hpaanalyzer` exits 2 with a message pointing at
+the wrapper, because a report is only comparable between two people if the four
+binaries under it are the same four binaries. See
+[DEVELOPING.md](DEVELOPING.md).
+
+This file records why the container exists at all, what the wrapper does to
+keep that promise, what was measured, and the two things it does **not**
+establish.
 
 ---
 
@@ -156,10 +164,10 @@ already reports both precisely — `error: <abspath> is not a directory`, exit 2
 — and a tidier message from the shell would substitute this script's wording
 and this script's exit code for the tool's.
 
-It does not turn an empty argv into `--help`. `python3 -m hpaanalyzer` with no
-arguments is an argparse usage error that exits 2. A wrapper answering the same
-input with help text and exit 0 has turned a failing command into a passing
-one. For the same reason there is no `CMD` in the Dockerfile: `CMD ["--help"]`
+It does not turn an empty argv into `--help`. Inside the image, an empty argv
+reaches argparse untouched and is a usage error that exits 2. A wrapper
+answering the same input with help text and exit 0 has turned a failing command
+into a passing one. For the same reason there is no `CMD` in the Dockerfile: `CMD ["--help"]`
 is the obvious friendly default and it was measured to break this contract.
 
 It does not interpret exit codes. The last line is `exec`, so the container's
@@ -198,7 +206,7 @@ chain is exercised end to end, including the real first-run prompt driven over
 a real controlling terminal via `pty.fork()`.
 
 And the one that matters most: **an analyzer report is byte-identical native
-versus containerised** — 62704 bytes either way, terminal summary included.
+versus containerised** — 63078 bytes either way, terminal summary included.
 Ten exit-code rows match native, including the four ways to exit 2.
 
 `tests/test_harness.py` keeps the parts of that under the normal regression net

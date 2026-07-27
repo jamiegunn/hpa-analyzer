@@ -162,9 +162,21 @@ def _no_jvm_evidence(ctx: ChartContext, result: AnalysisResult) -> None:
     for row in ctx.coverage:
         if row and row[0] == "Java / JVM checks":
             return
+    # R15. If the operator passed --assume-java and this chart has no
+    # Dockerfile, discovery._load_dockerfiles never runs and its "NOT applied"
+    # note is never written - so the only thing the report said about the flag
+    # was nothing at all. Silence about a discarded input is indistinguishable
+    # from having honoured it, which is the whole fault this iteration is about.
+    declined = ""
+    if ctx.assume_java_requested:
+        declined = (f" You passed --assume-java {ctx.assume_java_requested}; it "
+                    f"was NOT applied. That flag states which Java version is "
+                    f"in the image, not that there is one, and nothing here "
+                    f"evidences a JVM for it to describe.")
     ctx.coverage.append([
         "Java / JVM checks",
-        "NOT RUN - no JVM evidence in this chart. Inputs examined: "
+        "NOT RUN - no JVM evidence in this chart." + declined
+        + " Inputs examined: "
         + JVM_EVIDENCE_INPUTS +
         ". None of them mentions a JVM, so heap-vs-limit arithmetic, JDK "
         "container-awareness and flag checks were skipped and this chart is "

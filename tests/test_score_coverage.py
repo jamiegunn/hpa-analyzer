@@ -16,7 +16,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 from hpaanalyzer.__main__ import main
 from hpaanalyzer.engine import analyze
@@ -221,6 +221,94 @@ class TestDenominatorIsPrinted(unittest.TestCase):
             [l for l in a.splitlines() if "categor" in l],
             [l for l in b.splitlines() if "categor" in l])
         self.assertIn("7 of 10 categories", b)
+
+
+class TestGateCannotDeleteDeductions(unittest.TestCase):
+    """R14b. A coverage gate may not drop a category that lost points.
+
+    Found by this file, not by reading code. R13 added a gate that drops CROSS
+    when no JVM container sets limits.memory, reading the BASE context - but
+    engine.py also analyzes every values overlay and merges those findings in.
+    bad-chart sets no limit in values.yaml and 4 GiB in values-prod.yaml, where
+    XF001 and XF003 both fire, so the gate declared "not assessable" about a
+    category holding two criticals and removed fourteen weight points of real
+    deductions from the denominator. The score of a chart with two critical
+    cross-file faults went UP.
+
+    Two defences went in, and both are tested here, because either alone would
+    leave the other's failure silent:
+
+      - the gate learned about overlays (proofs._overlay_sets_mem_limit), and
+      - coverage() refuses to drop any category something deducted from,
+        whatever the gate says.
+
+    The second is the one that generalises. A gate predicts whether a category
+    COULD deduct; the findings record whether it DID. Where they disagree the
+    measurement wins.
+    """
+
+    def test_bad_chart_keeps_cross_because_an_overlay_deducts_from_it(self):
+        r = analyze(os.path.join(FIXTURES, "bad-chart"), helm_mode="off")
+        cross = [f for f in r.findings if f.category is Category.CROSS]
+        self.assertTrue(cross, "fixture no longer raises CROSS findings - this "
+                               "test cannot fail and must not silently pass")
+        cov = coverage(r)
+        self.assertIn(Category.CROSS, cov.assessed,
+                      f"CROSS was dropped from the denominator while "
+                      f"{sorted({f.rule_id for f in cross})} deducted from it")
+
+    def test_a_lying_gate_is_overridden_and_announced(self):
+        """The backstop, exercised directly rather than trusted.
+
+        The gate is monkeypatched to claim RESOURCES is unassessable on a chart
+        that has RESOURCES findings. Without the backstop this silently deletes
+        fifteen weight points; with it, the category stays and stderr says so.
+        """
+        import hpaanalyzer.scoring as sc
+        r = analyze(os.path.join(FIXTURES, "bad-chart"), helm_mode="off")
+        deducting = [f for f in r.findings
+                     if f.category is Category.RESOURCES
+                     and f.effective_deduction() > 0]
+        self.assertTrue(deducting, "fixture no longer deducts from RESOURCES")
+
+        real = sc.unassessed_reason
+        sc._GATE_WARNED.clear()
+        err = io.StringIO()
+        try:
+            sc.unassessed_reason = (
+                lambda cat, ctx: "a gate that is simply wrong"
+                if cat is Category.RESOURCES else real(cat, ctx))
+            with redirect_stderr(err):
+                cov = coverage(r)
+        finally:
+            sc.unassessed_reason = real
+        self.assertIn(Category.RESOURCES, cov.assessed)
+        self.assertEqual(cov.weight_assessed,
+                         coverage(r).weight_assessed,
+                         "the lying gate still moved the denominator")
+        self.assertIn("internal inconsistency", err.getvalue())
+        self.assertIn(sorted({f.rule_id for f in deducting})[0], err.getvalue())
+
+    def test_a_zero_point_finding_does_not_force_a_category_back_in(self):
+        """DF000 is INFO: it reports that no Dockerfile was found.
+
+        It fires on exactly the charts where DOCKERFILE cannot be assessed, so
+        a backstop keyed on 'has a finding' rather than 'lost points' would
+        score DOCKERFILE 100.0/A+ on a chart with no Dockerfile - the clean
+        bill of health this module's docstring forbids. A first draft did
+        exactly that and three tests above caught it.
+        """
+        d, dst = _copy_without_dockerfile("bad-chart")
+        try:
+            r = analyze(dst, helm_mode="off")
+            df = [f for f in r.findings if f.category is Category.DOCKERFILE]
+            self.assertTrue(df, "expected the no-Dockerfile INFO finding")
+            self.assertTrue(all(f.effective_deduction() == 0 for f in df),
+                            f"{[f.rule_id for f in df]} now deducts, so this "
+                            f"test no longer covers the zero-point case")
+            self.assertNotIn(Category.DOCKERFILE, coverage(r).assessed)
+        finally:
+            shutil.rmtree(d)
 
 
 class TestNotGradedStillHonest(unittest.TestCase):

@@ -48,7 +48,7 @@ def build_preflight(ctx: ChartContext) -> Preflight:
             ERROR, "No Chart.yaml found anywhere under the target directory.",
             "This is not a Helm chart directory. Point the tool at the folder "
             "that contains Chart.yaml (the chart root), e.g. "
-            "`python3 hpa-analyzer.py ./my-service`."))
+            "`./bin/hpa-analyzer ./my-service`."))
 
     if ctx.foreign_charts:
         others = ", ".join(ctx.foreign_charts)

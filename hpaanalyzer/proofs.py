@@ -8,7 +8,9 @@ import math
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from .dockerparse import effective_flags, flag_val, has_flag
-from .kube import (SIDECAR_NAMES, as_int, containers, container_jvm_env_flags,
+from .kube import (REPLICA_MANAGED_KINDS, SIDECAR_NAMES, UNSCALABLE_KINDS,
+                   as_int, containers,
+                   container_jvm_env_flags,
                    container_jvm_env_flag_source, container_jvm_evidence,
                    doc_name, is_sidecar, pod_spec)
 from .podresources import pod_resources, pods_per_node
@@ -158,8 +160,49 @@ def _pairs(ctx) -> List[Tuple[Any, Dict, Optional[DockerfileInfo]]]:
             break
     out = []
     for doc in ctx.workloads:
-        if (doc.kind or "").lower() not in ("deployment", "statefulset", "daemonset"):
-            continue
+        # R15: this used to skip every kind except Deployment, StatefulSet and
+        # DaemonSet, which was a coverage gate wearing a filter's clothes.
+        #
+        # `ctx.workloads` admits Job, CronJob, ReplicaSet and Rollout as well,
+        # and the scorer takes its category list from the kinds it FOUND, not
+        # from the kinds this function agreed to look at. So a chart whose only
+        # workload was a CronJob had every XF rule silently not run - all five
+        # of them are emitted from `_memory_budget`, which is reached only from
+        # here - and then scored Cross-File Consistency 100.0 / A+ at weight 14
+        # and printed "Scored over all 10 categories (100 of 100 weight)". That
+        # is this tool's own named forbidden fabrication: inventing a clean bill
+        # of health for something never looked at. Corpus chart c22 is a CronJob
+        # asking for -Xmx6g under a 4Gi limit - the same arithmetic that caps
+        # c07 at C - and it graded A 95.9.
+        #
+        # There was never a reason for the exclusion. A JVM told to take 6g of
+        # heap inside a 4Gi cgroup is OOM-killed on the same arithmetic whether
+        # its pod was made by a Deployment controller or by a schedule; the
+        # kind determines who creates the pod, not how much memory it may have.
+        # `kube.pod_spec()` already unwraps CronJob's jobTemplate correctly -
+        # which is precisely why the RESOURCES checks were analysing these
+        # workloads all along while the JVM ones were not.
+        #
+        # R17: and the R15 fix above is the eighth copy of the fault it was
+        # fixing. Read the literal it left behind: deployment, statefulset,
+        # daemonset, replicaset, job, cronjob, rollout - which is precisely the
+        # contents of `ctx.workloads` at the moment R15 was written, retyped by
+        # hand. R17 added ReplicationController to `ctx.workloads` and this
+        # line went stale the same day, silently, exactly as its own comment
+        # describes. Measured on two charts identical but for `kind:`, each a
+        # temurin:21-jre asking for -Xmx6g under a 4Gi limit:
+        #
+        #     Deployment             C   88.9   XF001
+        #     ReplicaSet             C   88.9   XF001
+        #     ReplicationController   A-  92.7   (none)
+        #
+        # 3.8 points and two grade bands, for identical arithmetic, because of
+        # a word missing from a tuple. So the tuple is gone rather than
+        # corrected: a filter whose only effect is to re-state its own input,
+        # minus whatever the author forgot, is not a filter. `ctx.workloads`
+        # IS the set of kinds that run containers; `kube.pod_spec()` already
+        # unwraps each of them. There is nothing left here to decide, and a
+        # copy that does not exist cannot rot.
         for c in containers(doc):
             if is_sidecar(c.get("name", ""), c.get("image", "")):
                 continue
@@ -167,6 +210,116 @@ def _pairs(ctx) -> List[Tuple[Any, Dict, Optional[DockerfileInfo]]]:
                 continue
             out.append((doc, c, df))
     return out
+
+
+def cross_no_limit_reason(ctx) -> Optional[str]:
+    """Why CROSS cannot be scored on this chart, when the cause is 'no limit'.
+
+    R13, and the third instance of one fault. XF001, XF002, XF003, XF004 and
+    XF005 are EVERY rule in Category.CROSS, and all five are gated on
+    `if lim ...`. On a chart that sets no limits.memory anywhere, the category
+    therefore cannot deduct a single point BY CONSTRUCTION - and scoring it
+    anyway yields 100.0 / A+ over fourteen weight points, which is precisely
+    what scoring.py's own docstring forbids: "invents a clean bill of health
+    for something never looked at". PB004/Dockerfile in R8 and the
+    helper-supplied resources in R11 were the first two; p14 found this one by
+    running fifteen charts on defaults.
+
+    The exception is deliberate and is the reason this function lives HERE,
+    next to the rules, rather than being reimplemented from memory in
+    scoring.py: XF006 fires with no limit. A chart that sizes the heap as a
+    percentage of a limit it never set HAS a possible deduction in this
+    category, so the category stays in the mean. Dropping it would delete a
+    CRITICAL finding from the score - which is the R8 fault exactly, pointed
+    the other way, and the one thing worse than a category scored 100 for
+    nothing is a CRITICAL that moves the number by zero.
+
+    A second exception, found by the R13 test sweep and NOT by reading this
+    code: `ctx` is the BASE context, but engine.py also runs every values
+    overlay and merges the extra findings back in. fixtures/bad-chart sets no
+    memory limit in values.yaml and a 4 GiB one in values-prod.yaml, where
+    XF001 and XF003 both fire. Reading only the base context, this function
+    said "not scoreable" about a category holding two critical findings, and
+    dropped fourteen weight points of real deductions out of the denominator -
+    the R8 fault inverted. Re-rendering each overlay here would duplicate the
+    engine and cost a helm invocation per overlay, so the overlays' raw values
+    are scanned for a memory limit instead: cheap, and it errs toward keeping
+    the category scored, which is the safe direction for a gate whose failure
+    mode is deleting deductions. scoring.coverage() carries the backstop for
+    anything this still misses.
+
+    Returns None when CROSS is scoreable (some JVM container has a limit, or
+    some JVM container can raise XF006), otherwise the sentence to print.
+    """
+    pairs = _pairs(ctx)
+    if not pairs:
+        # No JVM containers at all: scoring.py's existing has_jvm/has_workloads
+        # gate owns that case and phrases it better than this could.
+        return None
+    for doc, c, df in pairs:
+        _, lim = _res(c, "limits", "memory")
+        if lim is not None:
+            return None                       # XF001-XF005 are all live
+        if _pct_of_absent_limit(c, df) is not None:
+            return None                       # XF006 is live
+    if _overlay_sets_mem_limit(ctx):
+        return None                           # an overlay run can deduct here
+    return ("no container running a JVM sets limits.memory, and every rule in "
+            "this category compares the JVM's memory against that limit; with "
+            "nothing to compare against, the category cannot deduct a point, "
+            "so it is not scored rather than scored 100. The no-limit findings "
+            "themselves are reported under Resources (RS005)")
+
+
+def _overlay_sets_mem_limit(ctx) -> bool:
+    """Does any values overlay set a memory limit the base does not?
+
+    A structural walk rather than a path lookup, because `resources` is not at
+    a fixed key: charts nest it under the component name, under `global`, under
+    a list of sidecars. Anything shaped like `{"limits": {"memory": ...}}`
+    counts, and a false positive here only keeps a category IN the score,
+    which is the direction that cannot invent a clean bill of health.
+    """
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            lim = node.get("limits")
+            if isinstance(lim, dict) and lim.get("memory") is not None:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+
+    for name in getattr(ctx, "overlay_values", []) or []:
+        if walk(ctx.values_files.get(name)):
+            return True
+    return False
+
+
+def _pct_of_absent_limit(c: Dict, df: Optional[DockerfileInfo]) -> Optional[float]:
+    """The MaxRAMPercentage that will be taken of the NODE, or None.
+
+    The single definition of XF006's trigger, so the finding and the score
+    denominator cannot drift apart - the drift IS the bug this iteration
+    exists to fix. None when a limit exists (the percentage is then of the
+    limit, which is normal and correct), when no percentage is set, or when
+    -Xmx is set: an explicit -Xmx wins over MaxRAMPercentage, so the heap is
+    bounded by a number rather than by a share of a machine the chart has
+    never seen.
+    """
+    _, lim = _res(c, "limits", "memory")
+    if lim is not None:
+        return None
+    flags = _effective_flags(df, c)
+    if not flags:
+        return None
+    if parse_jvm_size(flag_val(flags, "Xmx") or ""):
+        return None
+    try:
+        pct_s = flag_val(flags, "MaxRAMPercentage")
+        return float(pct_s) if pct_s else None
+    except (TypeError, ValueError):
+        return None
 
 
 _NO_DF_ASSUMES = ("that the image's own java command line does not carry its "
@@ -657,6 +810,21 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
         heap = int(lim * 0.25)
         heap_src = f"JVM default 25% x limit {fmt_bytes(lim)}"
         heap_basis = Basis.DERIVED    # heap not set; relies on the JVM default
+    elif pct is not None and lim is None:
+        # R13. This case used to fall through to the final `else`, which
+        # printed "no limit and no explicit sizing - unbounded" over a chart
+        # that sizes the heap explicitly. The sizing is not missing; what is
+        # missing is the limit the percentage is a percentage OF, and with no
+        # cgroup limit the JVM takes that percentage of the NODE. Reporting
+        # the tool's inability to produce a number as an absence in the user's
+        # chart sends the reader to fix the wrong half: they set -Xmx, the
+        # limit is still unset, and the pod still has no ceiling.
+        heap = int(ASSUMED_NODE_RAM * pct / 100)
+        heap_src = (f"MaxRAMPercentage={pct:g}%{_via('MaxRAMPercentage')} x "
+                    f"assumed node RAM {fmt_bytes(ASSUMED_NODE_RAM)} - there "
+                    f"is NO limits.memory, so the percentage is taken of the "
+                    f"NODE, not of a container budget")
+        heap_basis = Basis.ASSUMED    # rests on an assumed node RAM size
     elif not sees:
         heap = int(ASSUMED_NODE_RAM * (pct if pct else 25) / 100)
         heap_src = (f"JVM CANNOT see the limit ({sees_note}); default "
@@ -671,8 +839,25 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
     # non-heap components are always estimates -> anything summing them is at
     # best DERIVED; if even the heap was assumed, the whole total is ASSUMED.
     total_basis = Basis.ASSUMED if heap_basis is Basis.ASSUMED else Basis.DERIVED
-    node_assumes = ("the node has ~16 GiB RAM (used only because this JVM "
-                    "cannot see the container limit)")
+
+    # Two different routes end at "assume the node has 16 GiB", and they are
+    # not the same defect, so they must not carry the same sentence: one is a
+    # JVM too old to read a limit that IS set, the other is a limit that was
+    # never set at all. A reader told the wrong one goes and upgrades a JDK
+    # that is already current.
+    # Asked through the shared predicate rather than restated from the locals,
+    # so the finding and the score denominator are the same condition by
+    # construction and not merely by agreement today.
+    pct_no_limit = _pct_of_absent_limit(c, df) is not None
+    if pct_no_limit:
+        node_assumes = (f"the node has ~{fmt_bytes(ASSUMED_NODE_RAM)} RAM: "
+                        f"with no limits.memory to take a percentage OF, "
+                        f"MaxRAMPercentage is applied to the node's memory, "
+                        f"so the heap target moves with whatever node this pod "
+                        f"lands on and this chart never fixes it")
+    else:
+        node_assumes = ("the node has ~16 GiB RAM (used only because this JVM "
+                        "cannot see the container limit)")
 
     def _assumes(basis) -> Optional[str]:
         """What could overturn a finding built on this arithmetic.
@@ -734,19 +919,30 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
     ]
     rows.extend(_comp_rows(comps))
 
-    # `banded` is false only when the user has measured EVERY non-heap
-    # component (--measured), so there is nothing left inside the sum for a
-    # range to be a range OF. R9 exists to stop the tool overstating what it
-    # knows; printing "T RANGE 852 MiB - 852 MiB" and "still fits with every
-    # estimate at its high end" over a sum with no estimates left in it is
-    # the same fault pointed the other way - it implies an uncertainty the
-    # tool no longer has, and invites the reader to discount a number they
-    # measured themselves. When the width is zero, the width is not reported.
+    # R9 wrote this as a two-way choice and its comment claimed "`banded` is
+    # false only when the user has measured EVERY non-heap component
+    # (--measured), so there is nothing left inside the sum for a range to be
+    # a range OF." That was true when it was written and stopped being true
+    # the moment `total` could be None: p14 caught the report printing
+    # "T = H + non-heap components (all measured, no estimates)" directly
+    # underneath six component rows each labelled "(est.)", on a chart where
+    # nothing had been measured and the sum simply did not exist. R9 exists to
+    # stop the tool overstating what it knows, and a two-way flag that treats
+    # "everything is known" and "the total is unknowable" as the same branch
+    # is that same fault wearing R9's own clothes.
+    #
+    # So the choice is three-way, and each branch states its own reason:
+    # no total at all, a total with estimates in it, a total with none.
     banded = total is not None and t_hi > t_lo
+    if total is None:
+        t_basis = ("T cannot be summed: H is unbounded (see the row above), "
+                   "and no total is reported rather than a wrong one")
+    elif banded:
+        t_basis = "T = H + non-heap components (typical values)"
+    else:
+        t_basis = "T = H + non-heap components (all measured, no estimates)"
     rows.append(["ESTIMATED PEAK RSS (T)",
-                 fmt_bytes(total) if total else "UNBOUNDED",
-                 "T = H + non-heap components (typical values)" if banded
-                 else "T = H + non-heap components (all measured, no estimates)"])
+                 fmt_bytes(total) if total else "UNBOUNDED", t_basis])
     if banded:
         rows.append(["T RANGE (lo - hi)", f"{fmt_bytes(t_lo)} - {fmt_bytes(t_hi)}",
                      "every estimate above at its low end, then its high end"])
@@ -863,6 +1059,16 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
                     fix="Set -XX:MaxRAMPercentage=50-75 explicitly.",
                     math=f"Unused-by-heap = L - (H + non-heap) ~= "
                          f"{fmt_bytes(max(0, lim - total))} of {fmt_bytes(lim)}."))
+    elif not lim and pct_no_limit:
+        verdict = (f"No memory limit, and the heap is sized as a PERCENTAGE of "
+                   f"one. MaxRAMPercentage={pct:g} is applied to whatever the "
+                   f"JVM reads as available memory, and with no cgroup memory "
+                   f"limit that is the NODE's RAM - so this container targets "
+                   f"~{fmt_bytes(heap)} of heap per replica on an assumed "
+                   f"{fmt_bytes(ASSUMED_NODE_RAM)} node, and a different number "
+                   f"on every differently-sized node in the cluster. Setting "
+                   f"-Xmx would bound it; setting limits.memory is the fix, "
+                   f"because it is the value the percentage is meant to be of.")
     elif not lim:
         verdict = ("No memory limit: the JVM competes with every pod on the "
                    "node; a leak becomes the node's problem. Set a limit and "
@@ -995,6 +1201,50 @@ def _memory_budget(ctx, result, doc, c, df: Optional[DockerfileInfo]):
                  f"{fmt_bytes(total-lim)}."))
     if lim and req and lim == req and heap and total and total <= lim:
         pass  # ideal; no finding
+    if pct_no_limit:
+        # R13. Found by p14, not by reading the code: a corpus chart with
+        # MaxRAMPercentage=75 and no limits.memory scored B+ and drew no
+        # finding at any severity, because XF001-XF005 are every rule in this
+        # category and all five are gated on `if lim`. The tool held every
+        # fact needed - it prints "MaxRAMPercentage is computed FROM it" in
+        # its own prose - and never drew the conclusion.
+        #
+        # CRITICAL, not HIGH: the failure is not "the pod might be a bit big".
+        # There is no ceiling at all. The heap target is a share of a machine
+        # the chart has never seen, so the same manifest is a 12 GiB request on
+        # a 16 GiB node and a 48 GiB one on a 64 GiB node - and because there
+        # is no limit, the kernel reclaims from the node's other pods rather
+        # than from this one. Basis is ASSUMED because the node size is
+        # assumed; per C2.2 that caps it at HIGH in any report that respects
+        # the cap, and `assumes` names the one thing that would change the
+        # number (never the conclusion: no limit is no limit at any node size).
+        result.add(Finding(
+            rule_id="XF006", severity=Severity.CRITICAL, category=Category.CROSS,
+            title="Heap sized as a percentage of a memory limit that is not set",
+            file=doc.file, basis=Basis.ASSUMED, assumes=node_assumes,
+            detail=f"{where}: MaxRAMPercentage={pct:g}"
+                   f"{_via('MaxRAMPercentage')} with no limits.memory. A "
+                   f"container-aware JVM with no cgroup memory limit reads the "
+                   f"NODE's memory, so the heap target is "
+                   f"~{fmt_bytes(heap)} per replica on an assumed "
+                   f"{fmt_bytes(ASSUMED_NODE_RAM)} node - not a container "
+                   f"budget, and not the same number on two different nodes.",
+            why="The percentage has nothing to be a percentage of. The JVM "
+                "will grow toward a share of the whole machine, the pod is "
+                "BestEffort/Burstable for memory so the kernel reclaims from "
+                "its NEIGHBOURS first, and the same chart behaves differently "
+                "on every node size in the cluster. Nothing in the manifest "
+                "bounds it.",
+            fix="Set limits.memory on this container. That is what "
+                "MaxRAMPercentage reads, so it fixes the sizing and the "
+                "ceiling in one edit; setting -Xmx alone bounds the heap but "
+                "still leaves the container without a limit.",
+            math=f"heap ~= MaxRAMPercentage({pct:g}%) x visible_memory. "
+                 f"With limits.memory unset, visible_memory = node RAM: "
+                 f"{fmt_bytes(ASSUMED_NODE_RAM)} -> {fmt_bytes(heap)}; "
+                 f"on a 64 GiB node -> "
+                 f"{fmt_bytes(int(64 * 1024**3 * pct / 100))}. The multiplier "
+                 f"is the node, and the chart does not choose the node."))
     if not sees and lim:
         result.add(Finding(
             rule_id="XF003", severity=Severity.CRITICAL, category=Category.CROSS,
@@ -1311,6 +1561,19 @@ def _hpa_math(ctx, result):
         if target_pct is None or target_pct <= 0:
             continue    # invalid target: finding HP026 covers it; no table
 
+        # R15. A table is the most confident thing this report produces: five
+        # columns of arithmetic under a heading with the object's name on it.
+        # Printing one for an HPA that can never act is worse than printing
+        # nothing, because a reader who skips to the tables - which is what
+        # tables are for - is shown a working autoscaler. HP042 carries the
+        # finding; the table must not contradict it by omission.
+        ref = spec.get("scaleTargetRef")
+        bad_kind = None
+        if isinstance(ref, dict):
+            k = str(ref.get("kind") or "").strip()
+            if k.lower() in UNSCALABLE_KINDS:
+                bad_kind = k
+
         # find a cpu request to anchor the math
         req = None
         for w in ctx.workloads:
@@ -1355,10 +1618,22 @@ def _hpa_math(ctx, result):
             concl += ("No CPU request found on the target workload: this whole "
                       "table is THEORETICAL - the controller cannot compute "
                       "utilization at all (see finding HP022).")
+        if bad_kind:
+            concl = (f"NONE OF THIS HAPPENS. The scaleTargetRef names a "
+                     f"{bad_kind}, which has no `scale` subresource, so the "
+                     f"controller reports FailedGetScale and never acts on any "
+                     f"row above (see HP042). The table is retained to show "
+                     f"what the declared thresholds WOULD have meant, and for "
+                     f"no other purpose. ") + concl
         result.add_proof(ProofTable(
-            title=f"HPA scaling arithmetic - HPA '{name}'",
-            intro=f"How the HPA converts measured CPU into replica counts "
-                  f"(current replicas = {cur} for illustration).",
+            title=f"HPA scaling arithmetic - HPA '{name}'"
+                  + (f" [INERT: target {bad_kind} cannot be scaled]"
+                     if bad_kind else ""),
+            intro=(f"How the HPA converts measured CPU into replica counts "
+                   f"(current replicas = {cur} for illustration)."
+                   if not bad_kind else
+                   f"What the HPA WOULD do if its target could be scaled. It "
+                   f"cannot: scaleTargetRef points at a {bad_kind}."),
             headers=["Avg utilization", "Per-pod usage", "Raw formula",
                      "Desired (clamped)", "Action"],
             rows=rows,
@@ -1441,7 +1716,12 @@ def _probe_vs_startup(ctx, result):
 def _availability_math(ctx, result):
     replicas = None
     for doc in ctx.workloads:
-        if (doc.kind or "").lower() in ("deployment", "statefulset"):
+        # R17: sixth copy of the inline pair. This one decides whether the
+        # availability arithmetic prints at all, so a Rollout- or
+        # ReplicaSet-only chart got the AV findings (after the fixes above) and
+        # then no table showing what its replica count buys - the finding
+        # without the number that justifies it.
+        if (doc.kind or "").lower() in REPLICA_MANAGED_KINDS:
             spec = doc.data.get("spec") if isinstance(doc.data, dict) else {}
             r = spec.get("replicas") if isinstance(spec, dict) else None
             if isinstance(r, int):

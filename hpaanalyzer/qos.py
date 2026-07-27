@@ -44,6 +44,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .quantity import parse_cpu, parse_memory
 
+_INC_PREFIX = "HELMINC@"
+"""helmyaml.INC_PREFIX, duplicated to keep this port free of parser imports.
+
+Only the include marker is special-cased. A leftover HELMVAL@ marker means the
+.Values path is unset in every values file read, and helm would render the same
+empty block, so the ordinary BestEffort arithmetic below is correct for it.
+"""
+
 GUARANTEED = "Guaranteed"
 BURSTABLE = "Burstable"
 BESTEFFORT = "BestEffort"
@@ -98,6 +106,16 @@ def requirements_qos(resources: Any) -> Tuple[str, Dict[str, str], List[str], Li
 
     Returns (qos, per_resource, undetermined_raw_values, defaulted_resources).
     """
+    # A helper-supplied block is a STRING marker, not a dict. _section() maps
+    # any non-dict to {}, i.e. to "nothing was set", and every resource then
+    # parses as the zero Quantity and lands on BESTEFFORT - the tool reporting
+    # a QoS class it derived from a file it never opened. UNKNOWN is the only
+    # answer the evidence supports; _qos() routes it to RS014, which already
+    # exists to say "refuses to guess it from values it could not resolve".
+    if isinstance(resources, str) and resources.startswith(_INC_PREFIX):
+        name = resources[len(_INC_PREFIX):] or "(unnamed template)"
+        return UNKNOWN, {}, [f'include "{name}"'], []
+
     requests = _section(resources, "requests")
     limits = _section(resources, "limits")
 
@@ -196,9 +214,20 @@ def pod_qos(ps: Optional[Dict[str, Any]]) -> PodQoS:
             pod_class = q
             reason = f"all containers so far are {q} (deciding container: '{name}')"
         elif pod_class != q:
-            early = BURSTABLE
-            reason = (f"container '{name}' is {q} but an earlier container is "
-                      f"{pod_class} - a mix of classes is Burstable")
+            # "A mix of classes is Burstable" holds only when both classes are
+            # KNOWN. If either side is UNKNOWN the pod may still be uniform -
+            # the unreadable container could match the readable one - so the
+            # mix rule cannot fire on a value the tool never saw.
+            if UNKNOWN in (q, pod_class):
+                early = UNKNOWN
+                reason = (f"container '{name}' is {q} and an earlier container "
+                          f"is {pod_class}; with one class unreadable the pod "
+                          f"class cannot be decided - it is uniform if the "
+                          f"unread container matches, Burstable if it does not")
+            else:
+                early = BURSTABLE
+                reason = (f"container '{name}' is {q} but an earlier container "
+                          f"is {pod_class} - a mix of classes is Burstable")
 
     if early is not None:
         final = early
@@ -212,8 +241,19 @@ def pod_qos(ps: Optional[Dict[str, Any]]) -> PodQoS:
 
     if final == UNKNOWN:
         bad = sorted({v for d in details for v in d.undetermined})
-        reason = ("QoS cannot be determined: unresolved/unparseable "
-                  f"quantities {bad}" if bad else
+        # Separate the two reasons a quantity was not usable, because they
+        # call for different actions: a helper body was never expanded (run
+        # with helm, or move the values into values.yaml), versus a value that
+        # was read and would not parse (fix the value).
+        inc = [b for b in bad if b.startswith('include "')]
+        rest = [b for b in bad if not b.startswith('include "')]
+        parts = []
+        if inc:
+            parts.append("resources are supplied by " + ", ".join(inc)
+                         + ", whose body was not expanded")
+        if rest:
+            parts.append(f"unresolved/unparseable quantities {rest}")
+        reason = ("QoS cannot be determined: " + "; ".join(parts) if parts else
                   "QoS cannot be determined from the rendered values")
 
     return PodQoS(final, reason, details,

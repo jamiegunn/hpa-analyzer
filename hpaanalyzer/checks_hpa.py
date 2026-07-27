@@ -4,8 +4,11 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .helmyaml import enclosing_conditions, line_of, values_lookup
-from .kube import (as_int, containers, container_jvm_env_flags, doc_name,
-                   is_jvm_image)
+from .kube import (REPLICA_MANAGED_KINDS, SCALABLE_KINDS, UNSCALABLE_KINDS,
+                   as_int, containers,
+                   container_jvm_env_flags, doc_name,
+                   helper_resources_ref, is_jvm_image, scale_candidates,
+                   scale_class)
 from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
                      ManifestDoc, Severity)
 from .quantity import parse_cpu, parse_memory, fmt_millicores
@@ -27,10 +30,9 @@ def _classify_replicas_gate(conds) -> str:
 
 def run(ctx: ChartContext, result: AnalysisResult) -> None:
     hpas = ctx.hpas
-    workloads = ctx.workloads
 
     if not hpas:
-        _no_hpa(ctx, result, workloads)
+        _no_hpa(ctx, result)
         return
 
     seen_targets: Dict[str, List[str]] = {}
@@ -62,8 +64,55 @@ def _add(result, **kw):
     result.add(Finding(**kw))
 
 
-def _no_hpa(ctx, result, workloads):
-    scalable = [w for w in workloads if (w.kind or "").lower() in ("deployment", "statefulset")]
+def _no_hpa(ctx, result):
+    """HP001/HP002: a chart that could carry an HPA and does not.
+
+    R16. Two things were wrong with the line below, and they are different
+    faults with different fixes.
+
+    It used to read `in ("deployment", "statefulset")` - a second, inline copy
+    of a list that already exists as kube.SCALABLE_KINDS, and one that had
+    drifted from it. SCALABLE_KINDS also contains `replicaset` and
+    `replicationcontroller`, both of which implement the `scale` subresource
+    and are therefore exactly what HP002 is about. A ReplicaSet chart with no
+    autoscaler got silence. There is no argument for that; it is a copy that
+    rotted, and the copy is deleted.
+
+    CORRECTION, recorded rather than quietly fixed. The paragraph above was
+    written first and claimed that swapping in SCALABLE_KINDS also recovered
+    ReplicationController. It did not, and running the case is what showed it:
+
+        kind                    HPA findings   HPA score
+        ReplicaSet              ['HP002']           94.0
+        ReplicationController   []                 100.0
+
+    because the list this function was handed is `ctx.workloads`, whose own
+    literal never mentions ReplicationController - so the RC document was
+    filtered out one level ABOVE the bug being fixed here, and fixing the copy
+    inside this function could not reach it. The same measurement turned up a
+    third case the constant cannot answer at all: an Argo `Rollout` DOES expose
+    /scale, is absent from both sets, and was likewise scoring 100.0. So the
+    input is now `kube.scale_candidates(ctx.docs)` and the test is
+    `kube.scale_class`, which has three answers instead of two. Two copies of a
+    two-valued list were the visible fault; the fact underneath was never
+    two-valued.
+
+    The `return` is the second fault and it is subtler. On a chart whose only
+    workload is a DaemonSet or a CronJob, silence here is RIGHT - telling an
+    operator to put an HPA on a DaemonSet would be worse than saying nothing.
+    But the same `return` was also, silently, the answer to a question nobody
+    asked it: "was this category assessed?" It was not, and scoring.py went on
+    to score the category 100.0 at weight 15 and print A+ for Horizontal Pod
+    Autoscaling on a chart with no autoscaler in it. That decision does not
+    belong here and is no longer made here - see scoring.not_applicable_reason,
+    which asks the same question of the same constant and answers it in the one
+    place that is entitled to.
+
+    This is the sixth time a filter written to choose findings turned out to be
+    choosing the denominator too (R8, R11, R13, R14b, R15 D4, and now this).
+    """
+    scalable = [d for d in scale_candidates(ctx.docs)
+                if scale_class(d.kind) == "scalable"]
     if not scalable:
         return
     f_auto, auto_en = values_lookup(ctx.values, "autoscaling.enabled")
@@ -222,8 +271,13 @@ def _metrics(ctx, result, hpa, name, spec, target):
 
     # gather workload requests for utilization math
     req_cpu = req_mem = None
+    helper_res: List[str] = []          # containers whose resources came from a .tpl
     if target:
         for c in containers(target):
+            h = helper_resources_ref(c)
+            if h is not None:
+                helper_res.append(h)
+                continue
             r = c.get("resources")
             if isinstance(r, dict) and isinstance(r.get("requests"), dict):
                 req_cpu = req_cpu or parse_cpu(r["requests"].get("cpu"))
@@ -245,7 +299,29 @@ def _metrics(ctx, result, hpa, name, spec, target):
                 _memory_metric(ctx, result, hpa, name, tgt, req_mem, target)
         # external/pods/object metrics: fine, no static validation
 
-    if targets_cpu and target is not None and req_cpu is None:
+    if targets_cpu and target is not None and req_cpu is None and helper_res:
+        # `req_cpu is None` has two causes and they are not interchangeable:
+        # no cpu request was written, or a request may well be written inside a
+        # named template this run never expanded. HP022 is a CRITICAL that says
+        # the HPA will never scale; asserting that from an unread .tpl file
+        # would be a guess wearing a fact's severity.
+        _add(result, rule_id="HP032", severity=Severity.INFO, category=Category.HPA,
+             title="HPA CPU target could not be checked against the workload's "
+                   "request (resources come from a named template)",
+             file=hpa.file,
+             detail=f"HPA '{name}' scales on CPU utilization; the target "
+                    f"workload's resources are supplied by "
+                    + ", ".join(f'include "{h}"' for h in sorted(set(helper_res)))
+                    + ", whose body was not expanded, so no cpu request was read.",
+             why="If that template really sets no cpu request, this HPA never "
+                 "scales at all (HP022 - utilization is usage/request, "
+                 "undefined without one). The tool is not claiming that here: "
+                 "it did not read the file, so it reports the gap instead of "
+                 "the verdict.",
+             fix=f"Run the same command with `helm` on PATH - the rendered "
+                 f"path expands the template and this check applies normally.",
+             basis=Basis.DERIVED)
+    elif targets_cpu and target is not None and req_cpu is None:
         _add(result, rule_id="HP022", severity=Severity.CRITICAL, category=Category.HPA,
              title="HPA scales on CPU but target workload has no CPU request",
              file=hpa.file,
@@ -342,8 +418,29 @@ def _target_is_jvm(ctx, target):
                 return False, Basis.OBSERVED
     jvm_dfs = [d for d in ctx.dockerfiles
                if d.java_major or d.java_opts or d.jvm_flags]
+    # R17 measured it. R16 parked this copy with "widening it moves scores on
+    # charts nobody has measured", which was the right call at the time and the
+    # wrong guess about the direction. The defect is not that the finding fires
+    # on too few charts - it is that the BASIS of the finding depends on the
+    # kind of a workload that has nothing to do with the question.
+    #
+    # `len(scalable) <= 1` means "only one thing here, so the pairing is
+    # obvious". With the inline pair, a second workload only counted if it was
+    # a Deployment or a StatefulSet. Five charts, identical but for the kind of
+    # a second workload that no HPA references:
+    #
+    #     one Deployment only      HP025 assumed
+    #     + a second Deployment    HP025 derived     <- ambiguous, says so
+    #     + a ReplicaSet           HP025 assumed     <- equally ambiguous
+    #     + a Rollout              HP025 assumed     <-      "
+    #     + a StatefulSet          HP025 derived
+    #
+    # ASSUMED is not a label, it is arithmetic: Finding.effective_deduction()
+    # caps ASSUMED at HIGH, so the two spellings of the same ambiguity also
+    # score differently. Rows 3 and 4 claim an obvious pairing on a chart with
+    # two workloads. That is the tool inventing confidence out of a kind name.
     scalable = [w for w in ctx.workloads
-                if (w.kind or "").lower() in ("deployment", "statefulset")]
+                if (w.kind or "").lower() in REPLICA_MANAGED_KINDS]
     if jvm_dfs and len(scalable) <= 1:
         # single workload + a Java image: the obvious pairing, but a guess
         return True, Basis.ASSUMED
@@ -508,6 +605,56 @@ def _target_is_out_of_scope(ctx, ref, hpa_name) -> bool:
     return False
 
 
+def _target_kind_scalable(ctx, result, hpa, name, ref):
+    """HP042: the target kind has no `scale` subresource, so the HPA is inert.
+
+    R15. HP041 already proved this tool resolves scaleTargetRef NAMES
+    correctly - corpus chart c27's deliberate case mismatch is caught - so the
+    gap here was never parsing. The `kind` was simply never compared against
+    the set of kinds that can be scaled at all, and an HPA pointed at a
+    CronJob was accepted in silence while the report went on to print a full
+    scaling-arithmetic table for it.
+
+    The failure mode is quiet and permanent. The HPA controller cannot fetch a
+    scale for the target, sets AbleToScale=False with FailedGetScale, and
+    logs. Nothing crashes, no pod restarts, no alert fires by default: the
+    autoscaler simply never acts, and the team believes the service scales
+    because the object exists and `kubectl get hpa` prints a row for it.
+
+    An unrecognised kind gets no finding. Argo Rollouts, KEDA ScaledObjects
+    and any number of CRDs implement `scale` properly, and this tool does not
+    have a list of every CRD in the world. Withholding a claim never becomes
+    asserting one.
+    """
+    kind = str(ref.get("kind") or "").strip()
+    if not kind:
+        return
+    why_not = UNSCALABLE_KINDS.get(kind.lower())
+    if why_not is None:
+        return
+    api = str(ref.get("apiVersion") or "").strip()
+    tgt = f"{api}/{kind}" if api else kind
+    _add(result, rule_id="HP042", severity=Severity.CRITICAL,
+         category=Category.HPA,
+         title=f"HPA targets a {kind}, which cannot be scaled",
+         file=hpa.file,
+         detail=f"HPA '{name}' has scaleTargetRef {tgt} "
+                f"'{ref.get('name')}'. {kind} does not implement the `scale` "
+                f"subresource: {why_not}.",
+         why="The HPA controller reaches its target through `scale` and "
+             "through nothing else. With no such subresource it reports "
+             "AbleToScale=False / FailedGetScale on every sync and never "
+             "acts. This does not fail loudly - the object applies cleanly, "
+             "`kubectl get hpa` lists it, and the only symptom is that "
+             "scaling silently never happens. A team that believes this "
+             "workload autoscales will find out during the incident that "
+             "autoscaling would have prevented.",
+         fix=f"Point the HPA at a Deployment or StatefulSet. If the intent "
+             f"was to size {kind} work, that is a different mechanism: "
+             f"parallelism for Jobs, node count for DaemonSets, or KEDA for "
+             f"event-driven scaling.")
+
+
 def _target_ref(ctx, result, hpa, name, spec, target, seen_targets):
     ref = spec.get("scaleTargetRef")
     if not isinstance(ref, dict):
@@ -519,6 +666,7 @@ def _target_ref(ctx, result, hpa, name, spec, target, seen_targets):
         return
     key = f"{ref.get('kind')}/{ref.get('name')}"
     seen_targets.setdefault(key, []).append(name)
+    _target_kind_scalable(ctx, result, hpa, name, ref)
     if target is None and ctx.workloads and _target_is_out_of_scope(ctx, ref, name):
         return
     if target is None and ctx.workloads:
@@ -579,12 +727,45 @@ def _replicas_conflict(ctx, result):
         # (that is a dangling target, HP041 - not a replicas-vs-HPA conflict).
         if any_literal_mismatch:
             return False
+        # R17 LEFT THIS ONE ALONE, and the reason is a measurement that did
+        # NOT come out, which is worth more written down than repeated.
+        #
+        # Two constructed attempts failed to reach this line. The first used a
+        # scaleTargetRef of `{{ .Release.Name }}-x`, which survives static
+        # parsing as a resolvable literal, so `any_literal_mismatch` returned
+        # False three lines above. The second named a `_helpers.tpl` include,
+        # which the static parser rewrites to `HELM_TPL_n` - and the loop above
+        # matches anything starting with "HELM" and returns True before F3 is
+        # consulted. Five charts differing only in a second workload's kind
+        # emitted identical HP050 in both attempts.
+        #
+        # So the branch is reachable only when the ref name contains "<" and
+        # does not begin with "HELM", a parser state neither probe produced.
+        # Changing an unreached predicate is not a fix, it is a guess with a
+        # diff attached - and this whole family exists because someone once
+        # made exactly that edit. Note the direction if it IS reached: this is
+        # a COUNT used as a confidence test, not a filter, so widening it would
+        # make HP050 fire LESS. That is the opposite of the site below, which
+        # is why "replace all five with one set" would have been wrong.
         scalable = [x for x in ctx.workloads
                     if (x.kind or "").lower() in ("deployment", "statefulset")]
         return bool(candidates) and len(candidates) == 1 and len(scalable) == 1
 
+    # R17. HP050 is CRITICAL and R14 caps the OVERALL grade at C when a
+    # non-ASSUMED critical is present, so this `continue` was not skipping a
+    # finding - it was skipping a grade cap. One chart per kind, each with
+    # `replicas: 3` and an HPA naming that same object:
+    #
+    #     Deployment              C-  71.3   HP050
+    #     StatefulSet             C-  71.3   HP050
+    #     ReplicaSet              C   78.3   (none)
+    #     Rollout                 C   77.9   (none)
+    #
+    # The ReplicaSet and the Rollout have the identical defect and score SEVEN
+    # POINTS HIGHER for it. Both implement /scale, both take spec.replicas,
+    # and `helm upgrade` resets that field on both at exactly the same moment.
     for w in ctx.workloads:
-        if (w.kind or "").lower() not in ("deployment", "statefulset"):
+        if (w.kind or "").lower() not in REPLICA_MANAGED_KINDS:
             continue
         spec = w.data.get("spec") if isinstance(w.data, dict) else {}
         if not isinstance(spec, dict) or "replicas" not in spec:
@@ -604,7 +785,15 @@ def _replicas_conflict(ctx, result):
 
         if helm_truth and hpa_rendered:
             _add(result, rule_id="HP050", severity=Severity.CRITICAL, category=Category.HPA,
-                 title="Rendered Deployment sets spec.replicas while an HPA manages it",
+                 # R17: the title said "Rendered Deployment" while the detail
+                 # beside it already interpolated w.kind. Once the loop above
+                 # reaches ReplicaSet and Rollout, a fixed noun here would
+                 # print "Rendered Deployment sets spec.replicas" over a
+                 # finding whose own detail says Rollout - and a reader who
+                 # greps their templates for a Deployment finds nothing and
+                 # concludes the tool is broken.
+                 title=f"Rendered {w.kind} sets spec.replicas while an HPA "
+                       f"manages it",
                  file=w.file, line=rep_line,
                  detail=f"`helm template` with the current values renders BOTH "
                         f"spec.replicas={rep_str} on {w.kind} '{name}' AND an "

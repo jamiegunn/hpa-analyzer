@@ -5,8 +5,9 @@ from typing import Any, Dict, List, Optional
 
 from . import qos as qosmod
 from .helmyaml import is_unresolved, line_of
-from .kube import (containers, doc_name, is_sidecar, pod_spec,
-                   this_container_is_jvm)
+from .kube import (BATCH_KINDS, REPLICA_MANAGED_KINDS, containers, doc_name,
+                   helper_resources_ref, is_sidecar,
+                   pod_spec, this_container_is_jvm)
 from .models import (AnalysisResult, Basis, Category, ChartContext, Finding,
                      Severity)
 from .podresources import pod_resources, pods_per_node
@@ -131,6 +132,38 @@ def _resources(ctx, result, doc, where):
         cname = c.get("name", "?")
         res = c.get("resources")
         loc = f"{where}, container '{cname}'"
+
+        # A named template supplies this block. The tool has NOT established
+        # that resources are missing - it has established that it cannot see
+        # them, because .tpl bodies are never expanded on the static path.
+        # Accusing the chart here would be a claim about a file that was not
+        # read; the labels check (TP011) already sets this precedent.
+        helper = helper_resources_ref(c)
+        if helper is not None:
+            _add(result, rule_id="RS018", severity=Severity.INFO,
+                 category=Category.RESOURCES,
+                 title="Container resources come from a named template (not read)",
+                 file=doc.file,
+                 detail=(f"{loc}: resources are supplied by "
+                         f"`include \"{helper}\"`. Helper bodies live in "
+                         f"templates/*.tpl, which this run did not expand, so "
+                         f"the requests and limits were neither read nor "
+                         f"checked."),
+                 why="This is NOT a finding that resources are missing - it is "
+                     "the tool declining to make that claim. helm renders "
+                     "whatever that define emits, which may be a complete and "
+                     "correct block. Suppressed for this container as a "
+                     "result: RS001 (no resources), RS011 (BestEffort QoS) "
+                     "and HP022 (HPA target has no CPU request), all three of "
+                     "which would otherwise have read invisibility as "
+                     "absence.",
+                 fix=f"Run the same command with `helm` on PATH - the rendered "
+                     f"path expands \"{helper}\" and every resource check "
+                     f"applies normally. Or move the values into values.yaml "
+                     f"and template them with `toYaml .Values.resources`, "
+                     f"which the static path can read.",
+                 basis=Basis.DERIVED)
+            continue
 
         if res is None or res == {} or is_unresolved(res):
             if is_unresolved(res):
@@ -554,15 +587,77 @@ def _probe_time(p: Dict[str, Any]) -> Dict[str, int]:
 
 
 def _probes(ctx, result, doc, where):
+    """Probe rules, gated per rule rather than per workload kind.
+
+    R18. This function opened with:
+
+        if kind in ("job", "cronjob"):
+            return
+
+    which is the ninth copy of the inline kind list R17 closed at eight sites,
+    and the second instance of R16's defect: a filter written to choose FINDINGS
+    was also, silently, choosing the DENOMINATOR.
+
+    MEASURED, on two charts whose container blocks are byte-identical and which
+    differ only in the workload kind and the scaffolding the API forces
+    (`restartPolicy: Never`) - liveness probe with initialDelaySeconds=5, no
+    startupProbe, timeoutSeconds left at the default 1:
+
+        Deployment   92.2  A-   PB004 (HIGH) + PB005 (MEDIUM)
+        Job          94.8  A    nothing at all
+
+    and the Job's report printed
+
+        | Health Probes & Lifecycle  | 100.0 | A+ | 10 |
+
+    ten weighted points of A+ for a category in which no rule ever ran - while
+    three pages further down the same report drew TABLE 3, "Probe budget vs JVM
+    startup", showing `startupProbe window: none - liveness starts immediately`.
+    The proof table and the grade were describing the same chart and disagreeing.
+
+    The Job is not the safer of the two. `restartPolicy: Never` means a liveness
+    kill does not restart the container, it fails the pod; the Job then burns
+    through backoffLimit and fails permanently. A Deployment in the same state
+    at least keeps trying.
+
+    THE SPLIT, one line of argument per rule, which is what the blanket `return`
+    replaced with nothing:
+
+      PB001 no readinessProbe      SKIPPED. The why is "the Service sends
+                                   traffic the moment the container starts".
+                                   Nothing routes traffic to a Job's pods, so
+                                   the sentence is false there.
+      PB002 no livenessProbe       SKIPPED. The fix is "add a livenessProbe" so
+                                   a wedged container gets restarted. Under
+                                   restartPolicy: Never it would not be
+                                   restarted, so the advice does not deliver
+                                   what it promises. The real control for a
+                                   wedged Job is activeDeadlineSeconds, and this
+                                   tool does not check it - recorded in
+                                   docs/ITERATIONS.md R18 as an unfilled gap
+                                   rather than fixed here by inventing a rule
+                                   this round has no measurement for.
+      PB003 identical probes       SKIPPED. It presupposes that the readiness
+                                   probe is doing a job worth distinguishing
+                                   from liveness. On a batch pod it is not, and
+                                   the honest advice would be "delete the
+                                   readiness probe" - a different finding, not
+                                   this one.
+      PB004 liveness with no       RUNS. The argument is about a container being
+            startupProbe           killed while it is still starting. It holds
+                                   word for word for a batch pod, and costs more
+                                   there.
+      PB005 timeoutSeconds <= 1    RUNS. Same reasoning, and it has never had
+                                   anything to do with what routes traffic.
+    """
     kind = (doc.kind or "").lower()
-    if kind in ("job", "cronjob"):
-        return
+    batch = kind in BATCH_KINDS
     for c in containers(doc):
         cname = c.get("name", "?")
         loc = f"{where}, container '{cname}'"
         live, ready, startup = c.get("livenessProbe"), c.get("readinessProbe"), c.get("startupProbe")
 
-        if not isinstance(ready, dict):
+        if not isinstance(ready, dict) and not batch:
             _add(result, rule_id="PB001", severity=Severity.HIGH, category=Category.PROBES,
                  title="No readinessProbe", file=doc.file,
                  detail=f"{loc}: readinessProbe is not defined.",
@@ -590,7 +685,7 @@ def _probes(ctx, result, doc, where):
                            "/-/ready on a metrics port). Check the image's "
                            "documentation rather than reusing the app's path."))
 
-        if not isinstance(live, dict):
+        if not isinstance(live, dict) and not batch:
             _add(result, rule_id="PB002", severity=Severity.MEDIUM, category=Category.PROBES,
                  title="No livenessProbe", file=doc.file,
                  detail=f"{loc}: livenessProbe is not defined.",
@@ -605,7 +700,7 @@ def _probes(ctx, result, doc, where):
                  fix="Add a livenessProbe, more tolerant than readiness "
                      "(higher failureThreshold/period).")
 
-        if isinstance(live, dict) and isinstance(ready, dict):
+        if isinstance(live, dict) and isinstance(ready, dict) and not batch:
             l_cmp = {k: v for k, v in live.items() if k in
                      ("httpGet", "tcpSocket", "exec", "grpc")}
             r_cmp = {k: v for k, v in ready.items() if k in
@@ -728,7 +823,13 @@ def _probes(ctx, result, doc, where):
 # ---------------------------------------------------------------------------
 
 def _availability(ctx, result, doc, where):
-    if (doc.kind or "").lower() not in ("deployment", "statefulset", "rollout"):
+    # R17. This copy already had Rollout - someone hit that gap and patched
+    # this one line, which is how a family of five diverging copies stays
+    # invisible: each is individually plausible. It still dropped ReplicaSet
+    # and ReplicationController, so a ReplicaSet chart with replicas: 1 and no
+    # HPA was told nothing about redundancy while the identical Deployment got
+    # AV001 and AV003.
+    if (doc.kind or "").lower() not in REPLICA_MANAGED_KINDS:
         return
     data = doc.data
     spec = data.get("spec") if isinstance(data, dict) else {}
@@ -776,12 +877,22 @@ def _availability(ctx, result, doc, where):
 
 def _pdb(ctx, result):
     pdbs = ctx.docs_of_kind("PodDisruptionBudget")
-    deployments = [d for d in ctx.workloads
-                   if (d.kind or "").lower() in ("deployment", "statefulset")]
-    if deployments and not pdbs:
+    # R17. Measured: a Rollout-only chart got AV003 (from _availability, which
+    # had been patched for Rollout) and no AV010 (from here, which had not).
+    # The same chart was told to spread its pods across nodes and not told that
+    # a node drain may take all of them at once - advice that only makes sense
+    # as a pair. An Argo Rollout needs a PDB for exactly the reason a
+    # Deployment does; the controller that owns the pods is not the part that
+    # a voluntary eviction cares about.
+    replicated = [d for d in ctx.workloads
+                  if (d.kind or "").lower() in REPLICA_MANAGED_KINDS]
+    if replicated and not pdbs:
+        kinds = sorted({d.kind for d in replicated if d.kind})
         _add(result, rule_id="AV010", severity=Severity.MEDIUM, category=Category.AVAIL,
              title="No PodDisruptionBudget", file="",
-             detail="Chart ships Deployments/StatefulSets but no PDB.",
+             # R17: was the fixed string "Deployments/StatefulSets", which
+             # named two kinds the chart might not contain either of.
+             detail=f"Chart ships {', '.join(kinds)} but no PDB.",
              why="Without a PDB, voluntary disruptions (node drains, cluster "
                  "upgrades, spot reclaims via drain) may evict ALL replicas "
                  "simultaneously. With an HPA this is worse: cluster-autoscaler "
@@ -795,7 +906,7 @@ def _pdb(ctx, result):
         min_av, max_un = spec.get("minAvailable"), spec.get("maxUnavailable")
         # find replica count to compare
         replicas = None
-        for d in deployments:
+        for d in replicated:
             r = d.data.get("spec", {}).get("replicas") if isinstance(d.data, dict) else None
             if isinstance(r, int):
                 replicas = r

@@ -50,7 +50,7 @@ run against the fixtures in this repository, and the output shown is what came b
 <p>Run <code>--check</code> first, every time you point the tool at a new directory. It reports what
 it discovered, flags anything misplaced, and exits without analyzing.</p>
 
-<pre><code>python3 -m hpaanalyzer ./my-service --check</code></pre>
+<pre><code>hpa-analyzer ./my-service --check</code></pre>
 
 <p>Exit <span class="exit">0</span> means it found a chart it can work with — possibly with
 warnings. Exit <span class="exit">2</span> means it is not a chart directory and analyzing would
@@ -73,17 +73,17 @@ yours are longer.</p>
 <table>
 <thead><tr><th>Flag</th><th>Report</th><th>Lines</th><th>Use it when</th></tr></thead>
 <tbody>
-<tr><td><code>--summary</code></td><td>Score, scorecard, and the top CRITICAL/HIGH findings only</td><td>167</td><td>You want the triage list and nothing else</td></tr>
-<tr><td><em>(default)</em></td><td>Everything, with LOW/INFO collapsed to one line each</td><td>906</td><td>Normal use</td></tr>
-<tr><td><code>--all</code></td><td>LOW/INFO expanded to full detail</td><td>1018</td><td>You are doing a full pass and want the small stuff too</td></tr>
-<tr><td><code>--full</code></td><td>Everything plus the education appendix (implies <code>--all --teach</code>)</td><td>1238</td><td>You are handing this to someone who has not met cgroups yet</td></tr>
+<tr><td><code>--summary</code></td><td>Score, scorecard, and the top CRITICAL/HIGH findings only</td><td>171</td><td>You want the triage list and nothing else</td></tr>
+<tr><td><em>(default)</em></td><td>Everything, with LOW/INFO collapsed to one line each</td><td>910</td><td>Normal use</td></tr>
+<tr><td><code>--all</code></td><td>LOW/INFO expanded to full detail</td><td>1022</td><td>You are doing a full pass and want the small stuff too</td></tr>
+<tr><td><code>--full</code></td><td>Everything plus the education appendix (implies <code>--all --teach</code>)</td><td>1242</td><td>You are handing this to someone who has not met cgroups yet</td></tr>
 </tbody>
 </table>
 
 <div class="note">
 <p><span class="label">Your numbers may differ</span> Those four figures are a <em>helm-mode</em> run.
-On a machine with no <code>helm</code> the same four commands over the same chart produce <strong>170,
-919, 1031 and 1251</strong> lines — the report is longer because static mode adds the parse-problem
+On a machine with no <code>helm</code> the same four commands over the same chart produce <strong>174,
+923, 1035 and 1255</strong> lines — the report is longer because static mode adds the parse-problem
 warning and rewrites every coverage row to say what was <em>parsed</em> rather than
 <em>rendered</em>. This was measured by running the same commands on a second machine that
 happens not to have <code>helm</code>, not estimated.</p>
@@ -101,7 +101,7 @@ appends the HPA/JVM primer as its own section. <code>--full</code> is exactly bo
 <p>Separately, <code>--quiet</code> changes only the <em>terminal</em> output — one line instead of the
 banner and the fix-first list — and leaves the report file untouched:</p>
 
-<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --quiet
+<pre><code>$ hpa-analyzer fixtures/good-chart --quiet
 hpa-analyzer [helm]: score 100.0/100 (grade A+), 0 finding(s) -&gt; /home/you/hpa_analysis_report.txt</code></pre>
 
 <p><code>--stdout</code> is the opposite: it prints the whole text report to standard output
@@ -111,7 +111,7 @@ hpa-analyzer [helm]: score 100.0/100 (grade A+), 0 finding(s) -&gt; /home/you/hp
 
 <p>The text report is always written. The other two formats are additive.</p>
 
-<pre><code>python3 -m hpaanalyzer ./my-service -o reports/svc.txt --html --json reports/svc.json</code></pre>
+<pre><code>hpa-analyzer ./my-service -o reports/svc.txt --html --json reports/svc.json</code></pre>
 
 <p><code>--html</code> takes an optional path. Given none, it derives one from <code>-o</code> by swapping the
 extension — the command above writes <code>reports/svc.html</code>. The HTML report is a single
@@ -154,7 +154,7 @@ CRITICAL, HIGH, MEDIUM, LOW, INFO; <code>basis</code> is one of <code>observed</
 <p>Three flags can turn a run into a failure. All of them exit <span class="exit">1</span>;
 nothing else does.</p>
 
-<pre><code>python3 -m hpaanalyzer ./svc --fail-on high --json reports/hpa.json --quiet</code></pre>
+<pre><code>hpa-analyzer ./svc --fail-on high --json reports/hpa.json --quiet</code></pre>
 
 <table>
 <thead><tr><th>Flag</th><th>Exits 1 when</th></tr></thead>
@@ -189,7 +189,7 @@ cannot count.</p>
 thread stacks, direct buffers and GC/internal overhead. When your <code>limits.memory</code> falls
 <em>inside</em> the resulting range, the tool refuses to pick an endpoint and says so:</p>
 
-<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart
+<pre><code>$ hpa-analyzer fixtures/good-chart
   GRADE A+  (100.0/100)   0 critical, 0 high, 0 medium, 0 low
   JVM fit UNDETERMINED (limit 1 GiB vs model range 722 MiB-1.2 GiB) for Deployment
   'release-name-orders-service' / container 'orders' - not scored, and NOT a pass.
@@ -200,7 +200,7 @@ thread stacks, direct buffers and GC/internal overhead. When your <code>limits.m
 them back. A measured component becomes <code>OBSERVED</code>, drops out of the range, and can no
 longer make the verdict undetermined.</p>
 
-<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --measured metaspace=210Mi,threads=180
+<pre><code>$ hpa-analyzer fixtures/good-chart --measured metaspace=210Mi,threads=180
   GRADE A+  (98.3/100)   0 critical, 1 high, 0 medium, 0 low
   JVM fit UNDETERMINED (limit 1 GiB vs model range 982 MiB-1.2 GiB) ...
   Fix first:
@@ -224,7 +224,7 @@ is seeing.</p>
 
 <p><code>--kube-version</code> deserves more attention than it usually gets:</p>
 
-<pre><code>python3 -m hpaanalyzer ./svc --kube-version 1.31.0</code></pre>
+<pre><code>hpa-analyzer ./svc --kube-version 1.31.0</code></pre>
 
 <p>It is passed straight to <code>helm template --kube-version</code>, and it says which Kubernetes
 version the chart is being rendered <em>for</em>. Without it, the tool derives one from the
@@ -234,7 +234,7 @@ that make no sense, this is the first flag to try.</p>
 
 <h2 id="crosscheck">Cross-check against the standard stack</h2>
 
-<pre><code>python3 -m hpaanalyzer ./svc --cross-check</code></pre>
+<pre><code>hpa-analyzer ./svc --cross-check</code></pre>
 
 <p>This runs <code>helm lint</code>, <code>kubeconform</code>, <code>kube-score</code> and <code>polaris</code> — whichever are
 on your <code>PATH</code> — and folds their verbatim output into a section of the report, with a
@@ -280,7 +280,7 @@ Details in <a href="limits.html#reproducibility">Limits</a>.</p>
 <p>A tag like <code>corp.registry/payments-api:4.2</code> tells the tool nothing about which JDK is
 inside. Supply it:</p>
 
-<pre><code>python3 -m hpaanalyzer ./svc --assume-java 17</code></pre>
+<pre><code>hpa-analyzer ./svc --assume-java 17</code></pre>
 
 <p>Accepts <code>8</code>, <code>8u151</code>, <code>11.0.16</code>, <code>17</code> and similar. Without it the tool does not
 skip the JVM checks wholesale — heap-versus-limit arithmetic needs only the flags and the

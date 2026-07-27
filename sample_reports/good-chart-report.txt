@@ -3,7 +3,7 @@
                                         hpa-analyzer v1.0.0                                         
 ====================================================================================================
 Target directory : /home/claude/hpa_analyzer/fixtures/good-chart
-Generated        : 2026-07-19 04:26:22
+Generated        : 2026-07-27 05:57:44
 Chart            : orders-service v2.3.1 (appVersion 1.14.2)
 
 Files analyzed:
@@ -17,6 +17,7 @@ Files analyzed:
   template   : templates/service.yaml
   template   : templates/tests/test-connection.yaml
   dockerfile : Dockerfile  [Java 21.0.3, jre]
+  jvm        : Dockerfile: FROM a Java 21 base image (update 3)
 
 
 ====================================================================================================
@@ -25,11 +26,21 @@ Files analyzed:
 
   OVERALL QUALITY SCORE : 100.0 / 100   GRADE: A+
   [##################################################]
-  Analysis mode         : static
+
+  What this number is: a weighted count of what THIS TOOL found. Each category starts at 100 and
+  loses points per finding. It is not an estimate of risk and not a prediction that the service
+  will hold up - a chart can score 100 and still fall over, because only the things the tool knows
+  how to look for can subtract.
+
+  Computed over         : all 10 categories (100 of 100 weight points)
+
+  Evidence: static template parsing, NOT a helm render (static (helm not found on PATH)) - see the
+  coverage section.
+  Analysis mode         : static (helm not found on PATH)
 
   Findings: 0 critical, 0 high, 0 medium, 0 low, 0 info
 
-  No critical or high findings - solid baseline.
+  No critical or high findings - but the JVM memory fit below is UNDETERMINED, which is not the same as a pass.
 
 
 ====================================================================================================
@@ -40,27 +51,46 @@ Findings can only come from files that were successfully analyzed. Anything mark
 skipped or unknown below produced NO findings - treat that as missing coverage, never as a clean
 bill of health.
 
-+--------------------------------------+--------------------------------------------------+
-| Input                                | Coverage                                         |
-+======================================+==================================================+
-| values.yaml                          | base values - used for primary analysis          |
-+--------------------------------------+--------------------------------------------------+
-| templates/deployment.yaml            | statically parsed (1 object(s))                  |
-+--------------------------------------+--------------------------------------------------+
-| templates/hpa.yaml                   | statically parsed (1 object(s))                  |
-+--------------------------------------+--------------------------------------------------+
-| templates/pdb.yaml                   | statically parsed (1 object(s))                  |
-+--------------------------------------+--------------------------------------------------+
-| templates/service.yaml               | statically parsed (1 object(s))                  |
-+--------------------------------------+--------------------------------------------------+
-| templates/tests/test-connection.yaml | helm test hook - lint-only, not workload-checked |
-+--------------------------------------+--------------------------------------------------+
-| Dockerfile                           | parsed (Java 21 detected)                        |
-+--------------------------------------+--------------------------------------------------+
++------------------------------------------------+-------------------------------------------------+
+| Input                                          | Coverage                                        |
++================================================+=================================================+
+| values.yaml                                    | base values - used for primary analysis         |
++------------------------------------------------+-------------------------------------------------+
+| templates/deployment.yaml                      | statically parsed (1 object(s))                 |
++------------------------------------------------+-------------------------------------------------+
+| templates/hpa.yaml                             | statically parsed (1 object(s))                 |
++------------------------------------------------+-------------------------------------------------+
+| templates/pdb.yaml                             | statically parsed (1 object(s))                 |
++------------------------------------------------+-------------------------------------------------+
+| templates/service.yaml                         | statically parsed (1 object(s))                 |
++------------------------------------------------+-------------------------------------------------+
+| templates/tests/test-connection.yaml           | helm test hook - lint-only, not                 |
+|                                                | workload-checked                                |
++------------------------------------------------+-------------------------------------------------+
+| Dockerfile                                     | parsed (Java 21 detected)                       |
++------------------------------------------------+-------------------------------------------------+
+| JVM memory fit - Deployment                    | UNDETERMINED - the limit 1 GiB lies inside the  |
+| '<orders.fullname>' / container 'orders'       | model's range 722 MiB-1.2 GiB, so the answer is |
+|                                                | decided by no single estimate but by Thread     |
+|                                                | stacks at its high end (200 MiB), JIT code      |
+|                                                | cache at its high end (128 MiB) together (164   |
+|                                                | MiB of movement against a 108 MiB gap). At      |
+|                                                | typical values T=916 MiB (margin +108 MiB), and |
+|                                                | any finding below is raised from that point     |
+|                                                | estimate and labelled as such. Not reported as  |
+|                                                | a fit or a misfit either way. To settle it:     |
+|                                                | kubectl exec POD -- jcmd 1 VM.native_memory     |
+|                                                | summary, then re-run with --measured metaspace= |
+|                                                | ...,codecache=...,threads=...,direct=...,gc=... |
++------------------------------------------------+-------------------------------------------------+
 
-Mode: static. Static scrubbing approximates helm rendering: conditionals are analyzed as taken and
-complex template expressions may hide configuration from these checks. Install helm on PATH and
-re-run for rendered-truth analysis - it materially improves precision.
+Analysis mode: static (helm not found on PATH). Templates were parsed with Go-template expressions
+scrubbed and, where possible, resolved from values.yaml, WITHOUT executing helm. Conditional blocks
+are analyzed as if taken; complex expressions (tpl, printf, required, subcharts) are beyond static
+resolution and files that failed to parse produced no findings at all - the coverage section lists
+every such gap.
+helm is not on PATH. Installing it and re-running upgrades this report to rendered-truth analysis,
+which materially improves precision.
 
 
 ====================================================================================================
@@ -92,8 +122,15 @@ re-run for rendered-truth analysis - it materially improves precision.
 +----------------------------------------+-------+-------+--------+--------------------+
 
 Scoring model: each category starts at 100; deductions are CRITICAL -25, HIGH -12, MEDIUM -6, LOW
--3, INFO -0, floored at 0. Overall = weighted mean over applicable categories (N/A categories are
-excluded, not free points).
+-3, INFO -0, floored at 0. Overall = weighted mean over the ASSESSED categories only. An unassessed
+category is not scored 0 and not scored 100 - there is no honest number for 'not looked at' - so it
+leaves the mean entirely, numerator and denominator together. That renormalises the rest, which is
+why the overall score above is printed with the count it was computed over, and why two scores are
+only comparable when those counts and these N/A rows match. A 'not applicable' category leaves the
+mean by the same arithmetic and for a different reason: not that the tool could not look, but that
+the thing it would have scored cannot exist for this chart - an HPA has no scale subresource to
+attach to on a DaemonSet, and no edit to the chart would give it one. Scoring that 100 would have
+been a clean bill of health for a question never asked.
 
 
 ====================================================================================================
@@ -116,29 +153,63 @@ TABLE 1: JVM memory budget - Deployment '<orders.fullname>' / container 'orders'
 Container memory must hold the WHOLE JVM, not just the heap. Estimation model: T = H + Metaspace +
 CodeCache + threads*Xss + DirectBuffers + GC/internal. JVM visibility of the limit: container-aware.
 
-+-----------------------------+----------+------------------------------------+
-| Component                   | Size     | Basis                              |
-+=============================+==========+====================================+
-| Container memory limit      | 1 GiB    | 1Gi                                |
-+-----------------------------+----------+------------------------------------+
-| Max heap (H)                | 512 MiB  | MaxRAMPercentage=50% x limit 1 GiB |
-+-----------------------------+----------+------------------------------------+
-| Metaspace (est.)            | 128 MiB  | typical framework app 80-180 MiB   |
-+-----------------------------+----------+------------------------------------+
-| JIT code cache (est.)       | 64 MiB   | steady-state                       |
-+-----------------------------+----------+------------------------------------+
-| Thread stacks (100 x 1 MiB) | 100 MiB  | -Xss x thread count                |
-+-----------------------------+----------+------------------------------------+
-| Direct buffers (est.)       | 64 MiB   | est. 64 MiB typical                |
-+-----------------------------+----------+------------------------------------+
-| GC + JVM internal (est.)    | 48 MiB   | card tables, symbols               |
-+-----------------------------+----------+------------------------------------+
-| ESTIMATED PEAK RSS (T)      | 916 MiB  | T = H + non-heap components        |
-+-----------------------------+----------+------------------------------------+
-| Margin (limit - T)          | +108 MiB | +11% of limit                      |
-+-----------------------------+----------+------------------------------------+
++--------------------------+--------------------+--------------------------------------------------+
+| Component                | Size               | Basis                                            |
++==========================+====================+==================================================+
+| Container memory limit   | 1 GiB              | 1Gi                                              |
++--------------------------+--------------------+--------------------------------------------------+
+| Max heap (H)             | 512 MiB            | MaxRAMPercentage=50% x limit 1 GiB               |
++--------------------------+--------------------+--------------------------------------------------+
+| Metaspace (est.)         | 128 MiB            | est. 128 MiB, range 80 MiB-180 MiB; typical      |
+|                          |                    | Spring/framework app; metaspace is uncapped by   |
+|                          |                    | default and grows with loaded classes            |
++--------------------------+--------------------+--------------------------------------------------+
+| JIT code cache (est.)    | 64 MiB             | est. 64 MiB, range 32 MiB-128 MiB; JIT code      |
+|                          |                    | cache steady-state occupancy;                    |
+|                          |                    | -XX:ReservedCodeCacheSize reserves 240 MiB by    |
+|                          |                    | default but commits far less                     |
++--------------------------+--------------------+--------------------------------------------------+
+| Thread stacks (est.)     | 100 MiB            | est. 100 MiB, range 50 MiB-200 MiB; thread count |
+|                          |                    | x stack size (both rows below)                   |
++--------------------------+--------------------+--------------------------------------------------+
+|   Thread count (est.)    | 100 (est. 50-200)  | est. 100, range 50-200; Spring Boot's embedded   |
+|                          |                    | Tomcat defaults to                               |
+|                          |                    | server.tomcat.threads.max=200; a low-traffic     |
+|                          |                    | service settles nearer 50                        |
++--------------------------+--------------------+--------------------------------------------------+
+|   Thread stack size      | 1 MiB              | -Xss (1 MiB) from the applied JVM flags          |
++--------------------------+--------------------+--------------------------------------------------+
+| Direct buffers (est.)    | 64 MiB             | est. 64 MiB, range 16 MiB-128 MiB; netty/NIO     |
+|                          |                    | direct buffers at steady state. NOT a cap: with  |
+|                          |                    | no -XX:MaxDirectMemorySize the JVM's own limit   |
+|                          |                    | defaults to max heap, so a leak goes far past    |
+|                          |                    | the high end                                     |
++--------------------------+--------------------+--------------------------------------------------+
+| GC + JVM internal (est.) | 48 MiB             | est. 48 MiB, range 32 MiB-96 MiB; GC bookkeeping |
+|                          |                    | (card tables, remembered sets), symbol and       |
+|                          |                    | string tables, JIT arenas, and the JVM binary    |
+|                          |                    | itself                                           |
++--------------------------+--------------------+--------------------------------------------------+
+| ESTIMATED PEAK RSS (T)   | 916 MiB            | T = H + non-heap components (typical values)     |
++--------------------------+--------------------+--------------------------------------------------+
+| T RANGE (lo - hi)        | 722 MiB - 1.2 GiB  | every estimate above at its low end, then its    |
+|                          |                    | high end                                         |
++--------------------------+--------------------+--------------------------------------------------+
+| Margin (limit - T)       | +108 MiB           | +11% of limit, at typical values                 |
++--------------------------+--------------------+--------------------------------------------------+
+| MARGIN RANGE             | -220 MiB - 302 MiB | limit - T at the pessimistic end, then the       |
+|                          |                    | optimistic end                                   |
++--------------------------+--------------------+--------------------------------------------------+
 
-  VERDICT: Fits with 108 MiB headroom (11% of limit).
+  VERDICT: UNDETERMINED: the limit 1 GiB falls INSIDE the range this model can produce (722 MiB -
+  1.2 GiB), so whether the JVM fits is decided by the estimates and not by your chart. At typical
+  values it fits (+108 MiB); that number is reported, and findings are raised from it, as a claim
+  about typical values only. No single estimate crosses the limit on its own inside its documented
+  band; the smallest set that does is Thread stacks at its high end (200 MiB), JIT code cache at
+  its high end (128 MiB), which moves T by 164 MiB against a gap of 108 MiB. To settle it, measure
+  and re-run: `kubectl exec POD -- jcmd 1 VM.native_memory summary` (needs
+  -XX:NativeMemoryTracking=summary), then pass the numbers back with --measured
+  metaspace=...,codecache=...,threads=...,direct=...,gc=...
 
 ----------------------------------------------------------------------------------------------------
 TABLE 2: CPU as seen by the JVM - Deployment '<orders.fullname>' / container 'orders'
@@ -189,24 +260,62 @@ A liveness probe that fires before the JVM can answer does not detect failure - 
   under CPU pressure (verify with the CPU table above).
 
 ----------------------------------------------------------------------------------------------------
-TABLE 4: QoS class and eviction order
+TABLE 4: QoS class and eviction order (pod-level)
 ----------------------------------------------------------------------------------------------------
-QoS derivation: Guaranteed iff requests == limits for BOTH cpu and memory on every container;
-BestEffort iff none set; else Burstable. Under node memory pressure kubelet evicts BestEffort, then
-Burstable exceeding requests, then Guaranteed last.
+Derivation, ported from Kubernetes pkg/apis/core/v1/helper/qos/qos.go: per container and per
+resource, request != limit -> Burstable; request == limit == 0 (or unset) -> BestEffort; request ==
+limit != 0 -> Guaranteed. The pod is Burstable as soon as ONE container is Burstable or two
+containers disagree; init containers are included. '= limit*' marks a request Kubernetes defaults
+from the limit at pod creation (SetDefaults_Pod) - such a container is Guaranteed even though the
+chart writes no requests block.
 
-+----------------------+---------+---------+---------+---------+-----------+-----------------------+
-| Container            | req CPU | req Mem | lim CPU | lim Mem | QoS       | Eviction              |
-+======================+=========+=========+=========+=========+===========+=======================+
-| Deployment/<orders.f | 500m    | 1 GiB   | -       | 1 GiB   | Burstable | evicted before        |
-| ullname>:orders      |         |         |         |         |           | Guaranteed            |
-+----------------------+---------+---------+---------+---------+-----------+-----------------------+
++------------------------------+-----------+---------+---------+---------+---------+---------------+
+| Container                    | Role      | req CPU | req Mem | lim CPU | lim Mem | container QoS |
++==============================+===========+=========+=========+=========+=========+===============+
+| Deployment/<orders.fullname> | container | 500m    | 1 GiB   | -       | 1 GiB   | Burstable     |
+| :orders                      |           |         |         |         |         |               |
++------------------------------+-----------+---------+---------+---------+---------+---------------+
+| Deployment/<orders.fullname> | -         | -       | -       | -       | -       | Burstable     |
+| => POD                       |           |         |         |         |         |               |
++------------------------------+-----------+---------+---------+---------+---------+---------------+
 
-  VERDICT: For latency-sensitive JVMs aim for Guaranteed memory (request = limit) and request-only
-  CPU.
+  VERDICT: Pod verdicts: Deployment/<orders.fullname>: Burstable - container 'orders' is Burstable
+  (cpu: request != limit) - upstream returns Burstable for the whole pod as soon as one container
+  is. evicted before Guaranteed (and first if over its request).  Only the POD row is the value
+  kubelet uses for eviction; verify with kubectl get pod -o
+  jsonpath='{.items[*].status.qosClass}'.
 
 ----------------------------------------------------------------------------------------------------
-TABLE 5: HPA scaling arithmetic - HPA '<orders.fullname>'
+TABLE 5: Pod scheduling footprint (what the node reserves)
+----------------------------------------------------------------------------------------------------
+Derivation, ported from Kubernetes component-helpers/resource/helpers.go
+(aggregateContainerResourcesByFn) and KEP-753: regular containers are SUMMED; an init container with
+restartPolicy: Always is a native sidecar (GA 1.33) and is also SUMMED, because it runs for the
+pod's whole life; a one-shot init container is MAX'd, against the sidecars declared before it -
+InitContainerUse(i) = sum(restartable init containers with index < i) + resources of the i-th. The
+pod's request is max(steady state, init peak), per resource. This is the number the scheduler
+compares against node allocatable; no container row is ever that number.
+
++---------------------------------------------+--------------------------------+---------+---------+
+| Container                                   | How it counts                  | req CPU | req Mem |
++=============================================+================================+=========+=========+
+| Deployment/<orders.fullname>:orders         | container, summed              | 500m    | 1 GiB   |
++---------------------------------------------+--------------------------------+---------+---------+
+| Deployment/<orders.fullname>  steady state  | sum of the above               | 500m    | 1 GiB   |
++---------------------------------------------+--------------------------------+---------+---------+
+| Deployment/<orders.fullname>  init peak     | max(init + sidecars before it) | 0 cores | 0 B     |
++---------------------------------------------+--------------------------------+---------+---------+
+| Deployment/<orders.fullname>  => POD        | max(steady, init peak)         | 500m    | 1 GiB   |
+| REQUEST                                     |                                |         |         |
++---------------------------------------------+--------------------------------+---------+---------+
+
+  VERDICT: Deployment/<orders.fullname>: reserves 500m CPU and 1 GiB on whichever node it lands.
+  An 8 GiB / 4-core node holds 8 by memory request, 8 by CPU request.  Verify against a live pod
+  with: kubectl get pod <name> -o jsonpath='{.spec.containers[*].resources.requests}' and kubectl
+  describe node <node> (Allocated resources).
+
+----------------------------------------------------------------------------------------------------
+TABLE 6: HPA scaling arithmetic - HPA '<orders.fullname>'
 ----------------------------------------------------------------------------------------------------
 How the HPA converts measured CPU into replica counts (current replicas = 3 for illustration).
 
@@ -238,7 +347,7 @@ How the HPA converts measured CPU into replica counts (current replicas = 3 for 
   usage exceeds ~385m per pod (70% x 500m x 1.1).
 
 ----------------------------------------------------------------------------------------------------
-TABLE 6: Availability vs replica floor
+TABLE 7: Availability vs replica floor
 ----------------------------------------------------------------------------------------------------
 Redundancy math for the minimum number of pods the chart allows to exist.
 
@@ -323,16 +432,17 @@ relevant to THIS chart are shown; names and selectors are filled in from your fi
 7. METHODOLOGY AND LIMITATIONS
 ====================================================================================================
 
-Analysis mode: static. Templates were parsed with Go-template expressions scrubbed and, where
-possible, resolved from values.yaml, WITHOUT executing helm. Conditional blocks are analyzed as if
-taken; complex expressions (tpl, printf, required, subcharts) are beyond static resolution and files
-that failed to parse produced no findings at all - the coverage section lists every such gap.
-Installing helm and re-running upgrades this report to rendered-truth analysis. Numeric estimates
-(metaspace, thread counts, node sizes, startup times, per-pod availability) are stated inline and
-should be replaced with your measured values for final sizing decisions; conclusions drawn from
-estimates say so. Complement this report with: helm lint && helm template | kubeconform, a policy
-engine (Polaris/Kyverno/OPA), and real load-test data with GC logs (-Xlog:gc* / -XX:+PrintGCDetails)
-and kubectl top / VPA recommendations.
+Analysis mode: static (helm not found on PATH). Templates were parsed with Go-template expressions
+scrubbed and, where possible, resolved from values.yaml, WITHOUT executing helm. Conditional blocks
+are analyzed as if taken; complex expressions (tpl, printf, required, subcharts) are beyond static
+resolution and files that failed to parse produced no findings at all - the coverage section lists
+every such gap. helm is not on PATH. Installing it and re-running upgrades this report to
+rendered-truth analysis, which materially improves precision. Numeric estimates (metaspace, thread
+counts, node sizes, startup times, per-pod availability) are stated inline and should be replaced
+with your measured values for final sizing decisions; conclusions drawn from estimates say so.
+Complement this report with: helm lint && helm template | kubeconform, a policy engine
+(Polaris/Kyverno/OPA), and real load-test data with GC logs (-Xlog:gc* / -XX:+PrintGCDetails) and
+kubectl top / VPA recommendations.
 
 ====================================================================================================
                                            END OF REPORT                                            

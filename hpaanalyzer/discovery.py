@@ -23,7 +23,8 @@ from .helmrender import (find_helm, render_chart, rendered_object_ids,
 from .renderplan import plan
 from .helmyaml import (deep_merge, load_yaml_docs, resolve_markers,
                        scrub_template)
-from .kube import dockerfile_jvm_evidence
+from .kube import (container_jvm_evidence, containers,
+                   dockerfile_jvm_evidence)
 from .models import ChartContext, ManifestDoc, MeasuredValues
 
 _SKIP_DIRS = {".git", "node_modules", ".idea", "__pycache__", ".helm"}
@@ -45,6 +46,7 @@ def discover(target: str, helm_mode: str = "auto",
              measured: Optional[Dict[str, int]] = None) -> ChartContext:
     ctx = ChartContext(root=os.path.abspath(target))
     ctx.kube_version_override = kube_version
+    ctx.assume_java_requested = assume_java
     # `MeasuredValues.of`, not `dict(...)`: the plain-dict copy this used
     # to be silently discarded the literals the user typed, so the budget
     # table cited `metaspace=220200960` back at somebody who wrote 210Mi.
@@ -581,6 +583,33 @@ def _load_dockerfiles(ctx: ChartContext, dockerfile_paths: List[str],
         ctx.parse_errors.append(
             f"--assume-java '{assume_java}' not understood "
             f"(expected forms: 8, 8u151, 11.0.16, 17)")
+
+    # R15. `--assume-java` answers "which version", not "is there a JVM".
+    #
+    # R8 established that a Dockerfile with no JVM in it does not have an
+    # unknown Java version - it has no Java version - and rewrote the checks
+    # and the coverage table accordingly. This flag was left as a hole in that
+    # wall: it filled in `java_major` on any Dockerfile that had none, which
+    # made `proofs._pairs()` treat every container in the chart as a JVM. On an
+    # nginx chart, `--assume-java 17` produced JV021 ("No JVM heap sizing is
+    # actually applied") and JV026 ("No applied -XX:+ExitOnOutOfMemoryError")
+    # against nginx, moved JAVA and CROSS out of `unassessed` and INTO the
+    # denominator, and the score ROSE, because two categories that had been
+    # honestly excluded were now scored against a JVM that does not exist.
+    #
+    # An operator passing this flag is telling us a version they know. They are
+    # not authorising us to invent a runtime. Where there is no JVM evidence
+    # anywhere - not in this Dockerfile, not in any container - the assumption
+    # has nothing to attach to and is refused, visibly.
+    chart_jvm = None
+    for doc in ctx.workloads:
+        for c in containers(doc):
+            ev = container_jvm_evidence(c)
+            if ev:
+                chart_jvm = f"{doc.kind} container '{c.get('name', '?')}': {ev}"
+                break
+        if chart_jvm:
+            break
     for p in sorted(dockerfile_paths):
         rel = _rel(ctx.root, p)
         try:
@@ -588,11 +617,27 @@ def _load_dockerfiles(ctx: ChartContext, dockerfile_paths: List[str],
                 raw = f.read()
             info = parse_dockerfile(rel, raw)
             _attach_launcher_scripts(info, os.path.dirname(p))
-            if info.java_major is None and assumed:
+            df_ev = dockerfile_jvm_evidence(info)
+            if info.java_major is None and assumed and (df_ev or chart_jvm):
                 info.java_major, info.java_update = assumed
                 ctx.assumed_java = assume_java
+                where = df_ev and "this Dockerfile" or chart_jvm
                 ctx.coverage.append(
-                    [rel, f"Java version ASSUMED {assume_java} (--assume-java)"])
+                    [rel, f"Java version ASSUMED {assume_java} (--assume-java); "
+                          f"a JVM is evidenced by {where}"])
+            elif info.java_major is None and assumed:
+                # Refused, and said so. A flag that silently does nothing is
+                # only marginally better than one that silently does the wrong
+                # thing; the operator asked for something and is owed the
+                # reason it did not happen.
+                ctx.coverage.append(
+                    [rel, f"--assume-java {assume_java} NOT applied: no JVM is "
+                          f"evidenced anywhere in this chart (no JRE/JDK base, "
+                          f"no java entrypoint, no JVM flags, no JAVA_OPTS in "
+                          f"any container). The flag states a version, not the "
+                          f"existence of a runtime - Java checks stay "
+                          f"unassessed rather than being scored against a JVM "
+                          f"that is not there"])
             elif info.java_major is None and dockerfile_jvm_evidence(info):
                 ctx.coverage.append(
                     [rel, "Java version UNKNOWN - JVM version checks reduced; "

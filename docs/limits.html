@@ -211,10 +211,14 @@ coverage section.</p>
 
 <p><strong>The proof-table numbers are arithmetic on estimates, not measurements.</strong></p>
 
-<p><strong>A finding's severity accounts for the cluster version your chart declares, and nothing
-else about your cluster.</strong> Deprecated-API severity is reconciled against <code>kubeVersion</code>: the
+<p><strong>A finding's severity accounts for one cluster version and nothing else about your
+cluster.</strong> Deprecated-API severity is reconciled against <code>kubeVersion</code>: the
 same <code>networking.k8s.io/v1beta1</code> Ingress is CRITICAL with no declared range or a modern one,
-and LOW under <code>&gt;=1.19.0-0 &lt;1.21.0-0</code>, a range where the API still exists. Namespace
+and LOW under <code>&gt;=1.19.0-0 &lt;1.21.0-0</code>, a range where the API still exists. Since R15,
+<code>--kube-version</code> overrides that reconciliation when you pass it — the chart's
+<code>kubeVersion</code> is a claim the chart makes about itself, while the flag is a statement about
+the world by somebody who can see the cluster, so where they disagree the flag wins and the
+finding says so rather than switching silently. Namespace
 LimitRange, quota and metrics setup are invisible and are in no severity at all.</p>
 
 <p><strong>The external-validator output is not ours.</strong> <code>--cross-check</code> runs those tools and
@@ -223,7 +227,10 @@ reports their output verbatim; this project does not vouch for it.</p>
 <p><strong>It does not know a Java version the base-image tag hides.</strong> Pass
 <code>--assume-java &lt;ver&gt;</code> for internal or corporate base images. Since R8 this no longer skips
 the JVM checks wholesale — heap-versus-limit arithmetic needs only the flags and the limit, and
-runs without it. What degrades is the version-dependent subset, and the report says which. Note
+runs without it. What degrades is the version-dependent subset, and the report says which. Since
+R15 the flag states a <em>version</em>, not the existence of a runtime: on a chart with no JVM
+evidenced anywhere, <code>--assume-java</code> is declined and the coverage section says why, because
+obeying it filed Java findings against an nginx chart and raised its score. Note
 also that this flag asks <em>you</em> for something usually sitting in your repository already, in
 <code>pom.xml</code>, <code>build.gradle</code> or <code>.java-version</code>; reading it from there is queued, not
 done.</p>

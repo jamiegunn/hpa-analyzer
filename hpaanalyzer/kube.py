@@ -273,6 +273,92 @@ def containers(doc: ManifestDoc, include_init: bool = False) -> List[Dict[str, A
     return out
 
 
+HELPER_PREFIX = "HELMINC@"
+"""Marker prefix helmyaml.scrub_template leaves where an include/template was.
+
+Duplicated as a literal rather than imported from .helmyaml so that kube.py
+keeps its current import set (re, dataclasses, typing, .models) and stays
+importable from every check module without a cycle. helmyaml.INC_PREFIX is
+the definition; a test pins the two together.
+"""
+
+
+def helper_resources_ref(c: Dict[str, Any]) -> Optional[str]:
+    """Named template supplying this container's resources, or None.
+
+    DELIBERATELY NARROWER THAN helmyaml.is_unresolved(). Those two conditions
+    look alike in the parse tree and mean opposite things about the chart:
+
+      resources: {{- toYaml .Values.resources | nindent 12 }}
+          leaves HELMVAL@resources when no values file read set that path.
+          The tool could not resolve it BECAUSE IT IS NOT SET, and helm would
+          render an empty resources block from the same inputs. "No resource
+          requests/limits" is then a true statement about the chart, and
+          RS001 is right to say it.
+
+      resources: {{- include "orders.resources" . | nindent 12 }}
+          leaves HELMINC@orders.resources. The body lives in a .tpl file,
+          which this parser never expands (discovery only records that
+          helpers exist). Helm would render whatever that define emits -
+          possibly a complete, correct resources block. Here the tool has not
+          established absence; it has established BLINDNESS. Saying "no
+          resources block" would be an assertion about a file it did not read.
+
+    Every caller that would otherwise accuse the chart of missing resources
+    must branch on this function first, and say which helper it could not see.
+    """
+    res = c.get("resources")
+    if isinstance(res, str) and res.startswith(HELPER_PREFIX):
+        return res[len(HELPER_PREFIX):] or "(unnamed template)"
+    return None
+
+
+def empty_values_resources_reach_a_container(ctx) -> bool:
+    """True when an empty `resources:` in values could actually land on a pod.
+
+    VA004 reads `resources: {}` in a values file and concludes something about
+    the PODS - "every pod is scheduled as BestEffort/unbounded". That inference
+    needs a container that consumes the key. A container whose block comes from
+    a named template does not consume it, and neither does one with the values
+    written out longhand; for those the empty key is dead weight in a values
+    file, not a scheduling defect.
+
+    The evidence that a container DOES consume it is that the container's own
+    resources came out empty or unresolved-from-values: under helm the empty
+    key renders an empty block, and on the static path it leaves HELMVAL@.
+    """
+    for doc in getattr(ctx, "workloads", []) or []:
+        for c in containers(doc, include_init=True):
+            res = c.get("resources")
+            if res is None or res == {}:
+                return True
+            if isinstance(res, str) and not res.startswith(HELPER_PREFIX):
+                return True          # HELMVAL@/HELMTPL - templated from values
+    return False
+
+
+def workload_resources_all_helper(ctx) -> bool:
+    """True when EVERY container of EVERY workload gets resources via a helper.
+
+    The precondition for dropping RESOURCES out of the score denominator: if
+    even one container was legible, the category has something real in it and
+    must stay in the mean.
+
+    init containers are INCLUDED in the sweep on purpose. RS016 and RS017 grade
+    init/sidecar resources, so a pod whose main container is helper-supplied but
+    whose init container is written out longhand still has a readable resources
+    finding to score - dropping the category there would delete a real deduction
+    the way the PB004/Dockerfile gate used to (see scoring.py's docstring).
+    """
+    seen = False
+    for doc in getattr(ctx, "workloads", []) or []:
+        for c in containers(doc, include_init=True):
+            seen = True
+            if helper_resources_ref(c) is None:
+                return False
+    return seen
+
+
 # env vars the JVM reads from its environment BY ITSELF, no entrypoint help -
 # so JVM flags set here in the pod spec are genuinely applied at runtime,
 # however the container was built. (Mirrors dockerparse.AUTO_READ_VARS.)
@@ -560,3 +646,131 @@ def doc_name(doc: ManifestDoc) -> str:
 # Measured against upstream ComputePodQOS it was wrong on 5 of 8 cases,
 # including two SINGLE-container cases (limits-without-requests, and zero
 # quantities) - see docs/ITERATIONS.md R1. Use hpaanalyzer.qos.pod_qos().
+
+
+# Kinds that implement the `scale` subresource, which is the entire interface
+# the HPA controller has to a target. Anything outside this set is either
+# known not to have it, or is a CRD we have not heard of - and those two are
+# not the same statement, so they are not stored in the same place.
+SCALABLE_KINDS = {"deployment", "replicaset", "replicationcontroller",
+                  "statefulset"}
+UNSCALABLE_KINDS = {
+    "daemonset": "a DaemonSet runs exactly one pod per eligible node; its "
+                 "replica count is a property of the cluster, not a field",
+    "job": "a Job's parallelism is fixed at creation and it is not a "
+           "long-running workload",
+    "cronjob": "a CronJob is a schedule, not a running workload - it creates "
+               "Jobs, and neither it nor they expose scale",
+    "pod": "a bare Pod is a single instance with no controller to scale it",
+}
+
+# R16. The comment above says the two sets are deliberately different
+# statements. They are - and for two rounds nothing acted on the difference,
+# because every caller asked a yes/no question of a three-valued fact and the
+# third value silently joined whichever branch the `if` fell through to.
+#
+# The three answers, and they are not interchangeable:
+#
+#   scalable    the object implements /scale. An HPA can target it. If the
+#               chart has no HPA, that is a finding (HP002).
+#   unscalable  the object cannot implement /scale, and the reason is written
+#               down. No finding - telling someone to autoscale a DaemonSet is
+#               worse than silence - but also not a clean bill of health, see
+#               scoring.not_applicable_reason.
+#   unknown     a pod-carrying kind this module has no scale information for.
+#               Argo `Rollout` is the live example: it DOES expose /scale, and
+#               claiming otherwise from a set that has never heard of it would
+#               be inventing the answer. So the tool says it does not know,
+#               which is what NOT ASSESSED is for.
+#
+# SCALE_CANDIDATE_KINDS deliberately does NOT match ChartContext.workloads. It
+# adds `replicationcontroller` and `pod`, both of which are exactly the subject
+# of the scale question and neither of which that property returns. Widening
+# `workloads` itself would change the input set of every pod-level rule in the
+# tool - probes, resources, security, the lot - and this round measured none of
+# that. The narrow set is the honest scope; the divergence is recorded here so
+# the next person does not "tidy" the two together without measuring it.
+SCALE_CANDIDATE_KINDS = SCALABLE_KINDS | set(UNSCALABLE_KINDS) | {"rollout"}
+
+# R17. A different question from either set above, and it needs its own name
+# because five separate places in the tool had answered it by re-typing
+# `("deployment", "statefulset")` inline.
+#
+# The question is: does this object carry a replica count that the CHART
+# AUTHOR chose? Not "can an HPA target it" (SCALABLE_KINDS - that is about the
+# /scale subresource) and not "is the scale question meaningful"
+# (SCALE_CANDIDATE_KINDS - that includes DaemonSet precisely so the tool can
+# say the question does not apply). This one is about `spec.replicas` being a
+# number in someone's values.yaml, because that is what every rule using the
+# inline pair was actually reasoning about:
+#
+#   HP050/HP051  helm and an HPA fighting over spec.replicas
+#   AV001        replicas: 1 with no HPA is zero redundancy
+#   AV002/AV003  rollout strategy and spreading, both meaningless without
+#                multiple chart-authored replicas
+#   AV010        a PDB protects a replica set from voluntary disruption
+#   availability math in proofs.py
+#
+# Rollout is IN: an Argo Rollout has spec.replicas and is routinely paired
+# with an HPA, and R17 measured HP050 staying silent on exactly that chart.
+# DaemonSet, Job, CronJob and Pod are OUT and it is not an oversight - a
+# DaemonSet's count is a property of the cluster, a Job's parallelism is fixed
+# at creation, and a bare Pod is one pod. Telling any of them to add a PDB or
+# raise their replica count is the DaemonSet-HPA advice R16 removed, wearing a
+# different rule ID.
+#
+# Note this set is deliberately NOT `SCALABLE_KINDS | {"rollout"}` spelled
+# inline at each call site. That is how the bug got in.
+REPLICA_MANAGED_KINDS = SCALABLE_KINDS | {"rollout"}
+
+# R18. The fifth question, and the ninth site. `checks_workload._probes` opened
+# with `if kind in ("job", "cronjob"): return` - one more inline copy, and it
+# was found by the generated kind sweep (proof/p20_kindsweep.py) rather than by
+# anyone reading the file.
+#
+# The question here is neither of the four above. It is: does this object run to
+# COMPLETION rather than serving traffic indefinitely? That is what the skipped
+# probe rules were actually reasoning about, and it does not line up with any
+# existing set:
+#
+#   not SCALABLE_KINDS       - a DaemonSet is unscalable and serves traffic all
+#                              day; it needs a readiness probe.
+#   not UNSCALABLE_KINDS     - same, plus `pod`, which is long-running.
+#   not REPLICA_MANAGED      - this has nothing to do with spec.replicas.
+#
+# So it gets its own name rather than being spelled inline for a ninth time.
+#
+# The `return` was ALSO only half right, which is the part that made it a
+# defect rather than a rough edge. Two of the five rules it skipped reason about
+# serving traffic and are correctly silent on a batch pod; two of them reason
+# about a container being killed while it is still starting, and that argument
+# holds verbatim for a Job - harder, in fact, because `restartPolicy: Never`
+# turns a liveness kill into a failed Job instead of a restart. See _probes for
+# the per-rule split and the measurement.
+BATCH_KINDS = {
+    "job": "a Job's pods run to completion; nothing routes traffic to them, "
+           "so readiness has no subscriber",
+    "cronjob": "a CronJob creates Jobs, whose pods run to completion; nothing "
+               "routes traffic to them, so readiness has no subscriber",
+}
+
+
+def scale_class(kind: Optional[str]) -> str:
+    """'scalable' | 'unscalable' | 'unknown' for one object kind."""
+    k = (kind or "").lower()
+    if k in SCALABLE_KINDS:
+        return "scalable"
+    if k in UNSCALABLE_KINDS:
+        return "unscalable"
+    return "unknown"
+
+
+def scale_candidates(docs: List[ManifestDoc]) -> List[ManifestDoc]:
+    """Every parsed object for which "could an HPA target this?" is a question.
+
+    Services, ConfigMaps and the rest are not silent about scaling; the
+    question does not apply to them at all, and they must not be able to make
+    a chart look like it has a workload.
+    """
+    return [d for d in docs
+            if (d.kind or "").lower() in SCALE_CANDIDATE_KINDS]

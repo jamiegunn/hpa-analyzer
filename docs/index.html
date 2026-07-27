@@ -43,34 +43,41 @@ does not prove. If you only read two pages, read this one and that one.</p>
 
 <h2>Install</h2>
 
-<p>Python 3.8 or newer, plus PyYAML. That is the whole dependency list.</p>
+<p><code>docker</code> (or <code>podman</code>, or <code>nerdctl</code>). That is the whole dependency list — you do not
+install Python, PyYAML or <code>helm</code> to use this tool.</p>
 
 <pre><code>git clone https://github.com/jamiegunn/hpa-analyzer.git
 cd hpa-analyzer
-pip install -r requirements.txt</code></pre>
+docker build -f docker/Dockerfile -t hpa-analyzer:latest .
+install -m 0755 bin/hpa-analyzer /usr/local/bin/hpa-analyzer</code></pre>
 
-<p>Two entry points exist and they are the same program — <code>python3 hpa-analyzer.py</code>
-is a thin shim over <code>python3 -m hpaanalyzer</code>. This site uses the module form
-throughout because it is the one that works from any directory once the repo is on
-your <code>PYTHONPATH</code>.</p>
+<p><code>bin/hpa-analyzer</code> is a shell wrapper around <code>docker run</code> and the point of it is that
+you should not have to know that: every flag works unchanged and the exit codes are the
+analyzer's own. It has <a href="container.html">its own page</a>.</p>
 
-<p><strong>Install <code>helm</code> too, if you can.</strong> With <code>helm</code> on your <code>PATH</code> the chart is
-rendered by the real template engine and the report says <code>helm (rendered truth)</code>.
-Without it the tool falls back to static parsing, says so, and rewrites its coverage
-table to mark every input as statically parsed. Both modes work. They do not always
-produce the same findings, and that difference is a fact about the tool you should know
-before two people compare reports — see <a href="limits.html#path">Your PATH changes the answer</a>.</p>
+<p><strong>Why the container is not optional.</strong> This tool's answer is a function of what is on
+<code>PATH</code>, and that is measured rather than claimed: with <code>helm</code> absent the same chart's
+report changes its <code>Analysis mode</code> from <code>helm (rendered truth)</code> to <code>static</code>, rewrites
+every row of the coverage table, drops whole categories out of the denominator the score
+is averaged over, changes the grade, and rewords a finding. Both runs are honest. Neither
+is comparable to the other — see
+<a href="limits.html#path">Your PATH changes the answer</a>. The image pins <code>helm</code>,
+<code>kubeconform</code>, <code>kube-score</code> and <code>polaris</code> at fixed versions so that stops happening, and
+running the module directly is refused: <code>python3 -m hpaanalyzer</code> exits
+<span class="exit">2</span> and tells you to use the wrapper. While it stayed equally
+documented, the image was optional, so it went unused, so the grades stayed
+incomparable.</p>
 
-<p>There is a third option that removes the <code>PATH</code> question entirely: run it from a
-container with the whole toolchain pinned, behind a shell wrapper that keeps every
-flag working. That is <a href="container.html">its own page</a>.</p>
+<p>Changing the analyzer itself is a different job with different rules, including a
+documented way to run it without the image — see
+<a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/DEVELOPING.md">DEVELOPING.md</a>.</p>
 
 <h2>First run</h2>
 
 <p>Before analyzing anything, ask the tool what it found. <code>--check</code> reports what it
 discovered and what looks misplaced, then exits without analyzing.</p>
 
-<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --check
+<pre><code>$ hpa-analyzer fixtures/good-chart --check
 INPUT CHECK - /home/you/hpa-analyzer/fixtures/good-chart
 -----------------------------------------------------------
   [ok]   Helm chart: Chart.yaml
@@ -91,7 +98,7 @@ clean report produced from files it never read. Confirm the inputs first, then a
 
 <h2>Analyze</h2>
 
-<pre><code>$ python3 -m hpaanalyzer fixtures/bad-chart
+<pre><code>$ hpa-analyzer fixtures/bad-chart
   [ok]   Helm chart: Chart.yaml
   [ok]   Values: values.yaml (+ 1 overlay: values-prod.yaml)
   [ok]   Templates: 3 file(s) under templates/

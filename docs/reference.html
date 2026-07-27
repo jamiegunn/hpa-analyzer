@@ -61,11 +61,18 @@ from <code>hpa-analyzer --help</code> at version 1.0.0 and checked against real 
 — a Dockerfile. It is required; running with no arguments is an argparse usage error that exits
 <span class="exit">2</span>.</p>
 
-<p>Three ways to invoke the same program:</p>
+<p>One way to invoke it:</p>
 
-<pre><code>python3 -m hpaanalyzer ./svc      # module form, used throughout these docs
-python3 hpa-analyzer.py ./svc     # shim, identical behaviour
-hpa-analyzer ./svc                # the container wrapper, see the Container page</code></pre>
+<pre><code>hpa-analyzer ./svc                # the container wrapper, see the Container page</code></pre>
+
+<p>There used to be two others — <code>python3 -m hpaanalyzer ./svc</code> and
+<code>python3 hpa-analyzer.py ./svc</code>. Both now exit <span class="exit">2</span> with a message
+pointing here. They ran the analyzer against whatever <code>helm</code>, <code>kubeconform</code>,
+<code>kube-score</code> and <code>polaris</code> happened to be on the host, which changes the analysis mode,
+the coverage table, the set of categories scored at all and the final grade — so the same
+chart scored differently on two machines and neither run was wrong. Pinning the toolchain
+is the only thing that makes the number mean anything across a team, and it only works if
+it is not optional.</p>
 
 <h2 id="output">Output &amp; verbosity</h2>
 
@@ -98,8 +105,8 @@ hpa-analyzer ./svc                # the container wrapper, see the Container pag
 </table>
 
 <p>Measured report sizes for <code>fixtures/bad-chart</code> (60 findings), with <code>helm</code> on
-<code>PATH</code>: <code>--summary</code> 167 lines, default 906, <code>--all</code> 1018, <code>--full</code> 1238.
-Without <code>helm</code> the same runs measure 170, 919, 1031 and 1251 — static mode is a longer
+<code>PATH</code>: <code>--summary</code> 171 lines, default 910, <code>--all</code> 1022, <code>--full</code> 1242.
+Without <code>helm</code> the same runs measure 174, 923, 1035 and 1255 — static mode is a longer
 report, not a shorter one. See <a href="usage.html#verbosity">Using it</a>.</p>
 
 <h2 id="analysis">Analysis</h2>
