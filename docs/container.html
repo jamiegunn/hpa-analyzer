@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Running hpa-analyzer from a container</title>
+<meta name="description" content="Run hpa-analyzer with helm, kubeconform, kube-score and polaris pinned, behind a shell wrapper that keeps every flag working.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html">Start here</a>
+      <a href="usage.html">Using it</a>
+      <a href="reading-the-report.html">Reading the report</a>
+      <a href="container.html" aria-current="page">Container</a>
+      <a href="reference.html">Reference</a>
+      <a href="limits.html">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Running it from a container</h1>
+
+<p class="lede"><code>bin/hpa-analyzer</code> is a shell wrapper around <code>docker run</code>. The point of it
+is that you should not have to know that. <code>hpa-analyzer --fail-on high ./svc</code> and
+<code>python3 -m hpaanalyzer --fail-on high ./svc</code> are meant to produce the same report text,
+print the same terminal summary, and exit with the same code — with only the toolchain
+underneath pinned.</p>
+
+<div class="toc">
+  <p>On this page</p>
+  <ul>
+    <li><a href="#why">Why bother</a></li>
+    <li><a href="#build">Build the image</a></li>
+    <li><a href="#install">Install the wrapper</a></li>
+    <li><a href="#first">First run, and the output directory</a></li>
+    <li><a href="#argv">What the wrapper does to your command line</a></li>
+    <li><a href="#env">Environment knobs</a></li>
+    <li><a href="#ci">CI</a></li>
+    <li><a href="#notestablished">Two things this does not establish</a></li>
+  </ul>
+</div>
+
+<h2 id="why">Why bother</h2>
+
+<p>The analyzer's answer is a function of <code>PATH</code>, and that is a measurement rather than a
+turn of phrase. Run the same chart with <code>helm</code> present and absent and the report changes its
+<code>Analysis mode</code> from <code>helm (rendered truth)</code> to <code>static</code>, rewrites every row of the
+coverage table, and rewords a finding. Add or remove <code>kubeconform</code>, <code>kube-score</code> or
+<code>polaris</code> and the <code>--cross-check</code> section gains or loses whole verdicts. Two engineers on
+the same commit of the same chart can hand each other different reports and both be right.</p>
+
+<p>Pinning the four binaries is the reason the image exists. Everything else in it is packaging.</p>
+
+<pre><code>helm         3.16.4
+kubeconform  0.6.7
+kube-score   1.20.0
+polaris      9.6.4</code></pre>
+
+<p>Those are <code>ARG</code>s at the top of <code>docker/Dockerfile</code>. Bump them deliberately. A toolchain
+change can move a report's findings, so the version of the image is part of the provenance of
+the report — treat it the way you would treat the version of a compiler in a build you have to
+reproduce.</p>
+
+<h2 id="build">Build the image</h2>
+
+<p>There is no published image. Build it yourself, from the repo root:</p>
+
+<pre><code>docker build -f docker/Dockerfile -t hpa-analyzer:latest .</code></pre>
+
+<p>The build is two stages. The first fetches the four binaries and — this matters —
+<strong>executes each one</strong> (<code>helm version --short</code>, <code>kubeconform -v</code>,
+<code>kube-score version</code>, <code>polaris version</code>) before anything is copied forward. A binary that
+downloaded but cannot run, because of a wrong architecture or a missing loader, would not
+announce itself at run time; it would surface as a quiet coverage downgrade in a report that
+still looks complete. <code>TARGETARCH</code> is set by BuildKit and all four projects publish
+<code>amd64</code> and <code>arm64</code>, so an Apple Silicon build gets native binaries rather than emulated
+ones.</p>
+
+<p><code>podman build</code> and <code>nerdctl build</code> work the same way; set
+<code>HPA_ANALYZER_CONTAINER_CLI</code> at run time to match.</p>
+
+<h2 id="install">Install the wrapper</h2>
+
+<pre><code>install -m 0755 bin/hpa-analyzer /usr/local/bin/hpa-analyzer</code></pre>
+
+<p>A single bash script with no dependencies beyond a container CLI. It is written for bash 3.2
+on purpose, because that is what macOS ships — hence the counter-based array loops rather than
+<code>declare -A</code> and <code>"${arr[@]}"</code>, which abort under <code>set -u</code> on an empty array in bash
+before 4.4.</p>
+
+<p>After that, it is just a command:</p>
+
+<pre><code>hpa-analyzer /path/to/your/service --fail-on high</code></pre>
+
+<h2 id="first">First run, and the output directory</h2>
+
+<p>The first time you run it against a chart it asks one question, on stderr:</p>
+
+<pre><code>First run. Where should reports be written?
+  Saved to ~/.config/hpa-analyzer/config and re-exposed as $HPA_ANALYZER_OUTPUT_DIR.
+  This sets the DEFAULT only - an explicit -o/--json/--html always wins.
+  [/current/dir] &gt;</code></pre>
+
+<p>An empty answer accepts the default. <code>~</code> is expanded, the directory is created if it does
+not exist, resolved physically, and written to
+<code>${XDG_CONFIG_HOME:-~/.config}/hpa-analyzer/config</code>. Asked once; every later run is silent.</p>
+
+<h3>"Save it as an environment variable"</h3>
+
+<p>A child process cannot export a variable into the shell that launched it. That is not a
+limitation of this script, it is how <code>execve</code> works, and any tool claiming otherwise is
+writing to a dotfile behind your back. So the request is honoured by writing a config file that
+the wrapper <strong>parses</strong> and re-exposes under the name you would have expected. Precedence,
+highest first:</p>
+
+<table>
+<thead><tr><th>Source</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>$HPA_ANALYZER_OUTPUT_DIR</code></td><td>Exported in your environment — wins</td></tr>
+<tr><td>The config file</td><td><code>~/.config/hpa-analyzer/config</code></td></tr>
+<tr><td>The first-run prompt</td><td>Interactive only</td></tr>
+<tr><td><code>$PWD</code></td><td>No terminal: fallback, announced on stderr</td></tr>
+</tbody>
+</table>
+
+<div class="good">
+<p><span class="label">Parsed, not sourced</span> The file belongs to you, but sourcing it would
+promote a typo in a dotfile into arbitrary code execution. This is proven rather than asserted:
+<code>proof/p10_harness.py</code> writes a config file containing a <code>touch &lt;canary&gt;</code> line, runs the
+wrapper, and shows the canary is never created. <code>tests/test_harness.py</code> keeps that check in
+the regression suite.</p>
+</div>
+
+<h3>No terminal</h3>
+
+<p>In CI, in cron, or behind a pipe there is no human to ask, so the wrapper does not ask. It
+uses <code>$PWD</code>, prints two notes on stderr saying so and naming the variable to set, and carries
+on. Blocking on a prompt there would hang exactly the runs — <code>--fail-on</code>, <code>--min-score</code>,
+<code>--json</code> — that the tool exists to provide. Measured cost of the no-TTY path: 0.01s, and no
+config file is written.</p>
+
+<h2 id="argv">What the wrapper does to your command line</h2>
+
+<p>Two things, and nothing else.</p>
+
+<p><strong>It appends <code>-o &lt;dir&gt;/hpa_analysis_report.txt</code> when, and only when, you did not pass
+<code>-o</code>/<code>--output</code> yourself.</strong> That replaces the tool's <em>default</em> output path. It never
+rewrites a path you typed — that is what makes "all the flags still work" literally true rather
+than approximately true. <code>--html</code> with no argument then lands beside the report for free,
+because the analyzer derives that path from <code>-o</code> itself.</p>
+
+<p><strong>It mounts every host path it can see at its own path</strong>, and sets the container's working
+directory to your <code>$PWD</code>. This is the single most important decision in the file. The report
+prints <code>Target directory : &lt;path&gt;</code> and the terminal prints <code>Full report: &lt;path&gt;</code>; mount
+the chart at <code>/work</code> and both become lies the moment somebody pastes them into another
+command. Mounting <code>/home/you/svc</code> at <code>/home/you/svc</code> is what makes the containerised report
+the same <em>bytes</em> as the native one, not merely the same findings with different paths in
+them.</p>
+
+<p>Charts mount read-only; only the parents of output paths are writable. Output directories are
+created host-side, by you, before the container starts, so the daemon cannot create them
+root-owned. The container itself runs as <code>--user $(id -u):$(id -g)</code>, so reports belong to
+you — which means running as a uid with no <code>/etc/passwd</code> entry and no writable home, which
+is why the image pins <code>HOME=/tmp</code>. Helm tolerates a missing <code>HOME</code> but not one it cannot
+write to.</p>
+
+<p><code>--help</code>, <code>--version</code> and a bare invocation mount nothing, prompt for nothing, and
+resolve no output directory. Being asked where to save reports because you typed
+<code>--version</code> would be absurd.</p>
+
+<h3>What it deliberately does not do</h3>
+
+<p>It does not validate your chart directory. A missing directory, or a file where a directory
+was expected, is passed straight through, because the analyzer already reports both precisely —
+<code>error: &lt;abspath&gt; is not a directory</code>, exit <span class="exit">2</span> — and a tidier
+message from the shell would substitute this script's wording and this script's exit code for
+the tool's.</p>
+
+<p>It does not turn an empty argv into <code>--help</code>. <code>python3 -m hpaanalyzer</code> with no arguments
+is an argparse usage error that exits <span class="exit">2</span>. A wrapper answering the same
+input with help text and exit 0 has turned a failing command into a passing one. For the same
+reason there is no <code>CMD</code> in the Dockerfile: <code>CMD ["--help"]</code> is the obvious friendly
+default and it was measured to break this contract.</p>
+
+<p>It does not interpret exit codes. The last line is <code>exec</code>, so the container's status
+becomes the script's status with nothing in between to have an opinion.</p>
+
+<h2 id="env">Environment knobs</h2>
+
+<table>
+<thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>HPA_ANALYZER_OUTPUT_DIR</code></td><td>Default report directory; beats the config file</td></tr>
+<tr><td><code>HPA_ANALYZER_IMAGE</code></td><td>Image to run (default <code>hpa-analyzer:latest</code>)</td></tr>
+<tr><td><code>HPA_ANALYZER_CONTAINER_CLI</code></td><td><code>docker</code> (default), <code>podman</code>, <code>nerdctl</code></td></tr>
+<tr><td><code>HPA_ANALYZER_DRY_RUN=1</code></td><td>Print the <code>docker run</code> argv and exit 0, run nothing</td></tr>
+<tr><td><code>HPA_ANALYZER_NO_USER=1</code></td><td>Skip <code>--user</code>; output will be root-owned</td></tr>
+</tbody>
+</table>
+
+<p><code>HPA_ANALYZER_DRY_RUN=1</code> is the honest way to answer "what is this thing about to do to my
+filesystem", and it is also what the test suite uses to check 19 different command lines without
+needing an image at all.</p>
+
+<h2 id="ci">CI</h2>
+
+<p>Nothing special. The wrapper is transparent to exit codes and does not prompt without a
+terminal, so:</p>
+
+<pre><code>export HPA_ANALYZER_OUTPUT_DIR="$PWD/reports"
+hpa-analyzer ./svc --fail-on high --json reports/hpa.json</code></pre>
+
+<p><span class="exit">0</span> ok, <span class="exit">1</span> a gate failed,
+<span class="exit">2</span> usage or IO error. Pin the image tag rather than tracking
+<code>latest</code>, for the reason the first section of this page exists.</p>
+
+<h2 id="notestablished">Two things this does not establish</h2>
+
+<div class="warn">
+<p><span class="label">One</span> <strong>The image measured in the proof is not the image in the
+Dockerfile.</strong> No container registry — and not even <code>get.helm.sh</code> — was reachable from the
+sandbox this was developed in, so the image used for the byte-identity check was assembled with
+<code>docker import</code> from that machine's own filesystem. Its four binaries are therefore the
+<em>same builds</em> the native run uses. That proves the <strong>harness</strong> transparent and proves
+nothing about whether helm 3.16.4 agrees with the helm you have. Build the real Dockerfile on a
+networked machine and re-run <code>proof/p10_harness.py</code>. If the byte-identity check then fails,
+the difference is the pinned toolchain — which is a fact about your report worth publishing, not
+a bug in the wrapper.</p>
+</div>
+
+<div class="warn">
+<p><span class="label">Two</span> <strong>Pinning makes the answer reproducible, not correct.</strong> If
+your cluster runs a different Helm, the pinned render is reproducibly the wrong one and the tool
+cannot tell. And <code>--cross-check</code> output is not reproducible run to run <em>even natively</em>,
+which containers do not fix — see <a href="limits.html#reproducibility">Limits</a>.</p>
+</div>
+
+<h3>What was measured</h3>
+
+<p><code>proof/p10_harness.py</code> — 88 checks, exit 0. The wrapper is a second argument parser, and it
+was checked against the first one rather than against its author's reading of it: the proof
+monkey-patches <code>argparse.ArgumentParser.parse_args</code>, dumps the resulting namespace, and
+asserts the shell agreed about which token is the positional directory. That catches the whole
+class of bug where <code>--kube-version 1.31.0 chart/</code> mounts <code>1.31.0</code>, and the <code>--html</code>
+optional-argument rule where <code>--html --summary chart/</code> swallows <code>--summary</code> and loses the
+chart.</p>
+
+<p>Your argv survives as a <em>prefix</em> of the container's argv, with at most <code>-o &lt;path&gt;</code>
+appended. Mounts are deduplicated, read-write wins over read-only for the same path, and
+<code>--help</code>/<code>--version</code>/bare mount nothing. The precedence chain is exercised end to end,
+including the real first-run prompt driven over a real controlling terminal via
+<code>pty.fork()</code>. And the one that matters most: an analyzer report is byte-identical native
+versus containerised — 62704 bytes either way, terminal summary included — with ten exit-code
+rows matching native, including the four ways to exit 2. That figure is a helm-mode run; the
+identity is what was measured, not the size, and a host with no <code>helm</code> produces a longer
+report (63410 bytes) natively while the image always has helm. That difference is the reason the
+comparison is run <em>native-with-helm</em> against <em>container</em> rather than however the host
+happens to be configured.</p>
+
+<p><code>tests/test_harness.py</code> keeps that under the normal regression net: 15 tests, all under
+<code>HPA_ANALYZER_DRY_RUN=1</code>, needing no daemon, no image and no network. Six deliberate
+mutations of the wrapper confirm those tests can actually fail — dropping <code>--kube-version</code>
+from the value-flag list fails two of them, appending <code>-o</code> over an explicit one fails three,
+turning an empty argv into <code>--help</code> fails one, mounting the chart at <code>/work</code> fails one,
+sourcing the config instead of parsing it fails the canary test, and validating the chart
+directory in the shell fails one. A test that cannot fail is not a test, and this project has
+shipped one before.</p>
+
+<p>The full write-up, including the parts that did not make this page, is in
+<a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/DOCKER.md"><code>docs/DOCKER.md</code></a>.</p>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/DOCKER.md">docs/DOCKER.md</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

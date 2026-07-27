@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Using hpa-analyzer</title>
+<meta name="description" content="Task-oriented guide to hpa-analyzer: verbosity modes, output formats, CI gates, --measured, and cross-checking against kubeconform, kube-score and polaris.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html">Start here</a>
+      <a href="usage.html" aria-current="page">Using it</a>
+      <a href="reading-the-report.html">Reading the report</a>
+      <a href="container.html">Container</a>
+      <a href="reference.html">Reference</a>
+      <a href="limits.html">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Using it</h1>
+
+<p class="lede">One page, organised by what you are trying to do. Every command block below was
+run against the fixtures in this repository, and the output shown is what came back.</p>
+
+<div class="toc">
+  <p>On this page</p>
+  <ul>
+    <li><a href="#check">Confirm it found your files</a></li>
+    <li><a href="#verbosity">Choose how much detail</a></li>
+    <li><a href="#formats">Get HTML or JSON out</a></li>
+    <li><a href="#ci">Gate a pipeline on it</a></li>
+    <li><a href="#measured">Settle an UNDETERMINED verdict with real numbers</a></li>
+    <li><a href="#helm">Control how the chart is rendered</a></li>
+    <li><a href="#crosscheck">Cross-check against the standard stack</a></li>
+    <li><a href="#java">When the base image hides the Java version</a></li>
+  </ul>
+</div>
+
+<h2 id="check">Confirm it found your files</h2>
+
+<p>Run <code>--check</code> first, every time you point the tool at a new directory. It reports what
+it discovered, flags anything misplaced, and exits without analyzing.</p>
+
+<pre><code>python3 -m hpaanalyzer ./my-service --check</code></pre>
+
+<p>Exit <span class="exit">0</span> means it found a chart it can work with — possibly with
+warnings. Exit <span class="exit">2</span> means it is not a chart directory and analyzing would
+be theatre. The check also names the render mode it is about to use, which is the earliest
+point at which you can notice that <code>helm</code> is missing.</p>
+
+<div class="note">
+<p><span class="label">Why</span> A report is only as good as its inputs, and a static analyzer
+that silently reads nothing produces a clean report. <code>--check</code> is the cheapest way to
+find out that your values file is named something the tool did not look for.</p>
+</div>
+
+<h2 id="verbosity">Choose how much detail</h2>
+
+<p>Four settings, from triage to teaching. Line counts below are the real report sizes for
+<code>fixtures/bad-chart</code> (60 findings), so the ratios are honest rather than illustrative.
+They were measured <strong>with <code>helm</code> on <code>PATH</code></strong>; see the note under the table if
+yours are longer.</p>
+
+<table>
+<thead><tr><th>Flag</th><th>Report</th><th>Lines</th><th>Use it when</th></tr></thead>
+<tbody>
+<tr><td><code>--summary</code></td><td>Score, scorecard, and the top CRITICAL/HIGH findings only</td><td>167</td><td>You want the triage list and nothing else</td></tr>
+<tr><td><em>(default)</em></td><td>Everything, with LOW/INFO collapsed to one line each</td><td>906</td><td>Normal use</td></tr>
+<tr><td><code>--all</code></td><td>LOW/INFO expanded to full detail</td><td>1018</td><td>You are doing a full pass and want the small stuff too</td></tr>
+<tr><td><code>--full</code></td><td>Everything plus the education appendix (implies <code>--all --teach</code>)</td><td>1238</td><td>You are handing this to someone who has not met cgroups yet</td></tr>
+</tbody>
+</table>
+
+<div class="note">
+<p><span class="label">Your numbers may differ</span> Those four figures are a <em>helm-mode</em> run.
+On a machine with no <code>helm</code> the same four commands over the same chart produce <strong>170,
+919, 1031 and 1251</strong> lines — the report is longer because static mode adds the parse-problem
+warning and rewrites every coverage row to say what was <em>parsed</em> rather than
+<em>rendered</em>. This was measured by running the same commands on a second machine that
+happens not to have <code>helm</code>, not estimated.</p>
+<p>For this chart the verdict did not move — GRADE F, 45.5/100, the same 60 findings, the same
+top five. That is a property of this fixture, not a guarantee: static mode is a weaker reading of
+a chart, and the tool says so on its own banner rather than leaving you to notice. Compare
+<code>mode: helm</code> with <code>mode: static (helm not found on PATH)</code> on the last line of the
+terminal summary before comparing anything else.</p>
+</div>
+
+<p><code>--summary</code> and <code>--full</code> are mutually exclusive; argparse rejects the pair. Two
+independent knobs sit underneath: <code>--all</code> expands the quiet findings, and <code>--teach</code>
+appends the HPA/JVM primer as its own section. <code>--full</code> is exactly both.</p>
+
+<p>Separately, <code>--quiet</code> changes only the <em>terminal</em> output — one line instead of the
+banner and the fix-first list — and leaves the report file untouched:</p>
+
+<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --quiet
+hpa-analyzer [helm]: score 100.0/100 (grade A+), 0 finding(s) -&gt; /home/you/hpa_analysis_report.txt</code></pre>
+
+<p><code>--stdout</code> is the opposite: it prints the whole text report to standard output
+<em>as well as</em> writing the file.</p>
+
+<h2 id="formats">Get HTML or JSON out</h2>
+
+<p>The text report is always written. The other two formats are additive.</p>
+
+<pre><code>python3 -m hpaanalyzer ./my-service -o reports/svc.txt --html --json reports/svc.json</code></pre>
+
+<p><code>--html</code> takes an optional path. Given none, it derives one from <code>-o</code> by swapping the
+extension — the command above writes <code>reports/svc.html</code>. The HTML report is a single
+self-contained file with a table of contents, collapsible sections and a severity filter;
+open it in a browser, no server needed.</p>
+
+<div class="warn">
+<p><span class="label">Careful</span> <code>--html</code>'s argument is optional, which means
+<code>--html --summary ./chart</code> would let <code>--html</code> swallow <code>--summary</code>. Put <code>--html</code> last,
+or give it an explicit path. The container wrapper is tested specifically against this
+case (see <a href="container.html#argv">how the wrapper reads your command line</a>).</p>
+</div>
+
+<p><code>--json</code> writes the machine-readable form. Top-level keys are <code>target</code>, <code>mode</code>,
+<code>score</code>, <code>grade</code>, <code>graded</code>, <code>score_coverage</code>, <code>counts</code>, <code>findings</code>,
+<code>coverage</code>, <code>cluster_probes</code>, <code>preflight</code> and <code>cross_check</code>. Each finding looks
+like this:</p>
+
+<pre><code>{
+ "rule": "CH002",
+ "severity": "MEDIUM",
+ "basis": "observed",
+ "assumes": null,
+ "category": "Helm Chart Structure &amp; Hygiene",
+ "title": "Chart apiVersion v1 (Helm 2 era)",
+ "file": "Chart.yaml",
+ "line": null,
+ "detail": "Chart.yaml declares apiVersion: v1.",
+ "why": "apiVersion v1 targets Helm 2, which reached end of life in Nov 2020 ...",
+ "fix": "Set apiVersion: v2 and manage dependencies via the 'dependencies' key ...",
+ "math": null
+}</code></pre>
+
+<p class="caption">A real finding from <code>fixtures/bad-chart</code>. <code>severity</code> is one of
+CRITICAL, HIGH, MEDIUM, LOW, INFO; <code>basis</code> is one of <code>observed</code>, <code>derived</code>,
+<code>assumed</code>. Full shape on the <a href="reference.html#json">reference page</a>.</p>
+
+<h2 id="ci">Gate a pipeline on it</h2>
+
+<p>Three flags can turn a run into a failure. All of them exit <span class="exit">1</span>;
+nothing else does.</p>
+
+<pre><code>python3 -m hpaanalyzer ./svc --fail-on high --json reports/hpa.json --quiet</code></pre>
+
+<table>
+<thead><tr><th>Flag</th><th>Exits 1 when</th></tr></thead>
+<tbody>
+<tr><td><code>--fail-on {none,low,medium,high,critical}</code></td><td>Any finding exists at or above that severity</td></tr>
+<tr><td><code>--min-score N</code></td><td>The score is below N — <em>or</em> the run was ungradeable</td></tr>
+<tr><td><code>--require-coverage</code></td><td>Any scoring category could not be assessed</td></tr>
+</tbody>
+</table>
+
+<p>Measured, so you can trust the table: <code>--fail-on high</code> against <code>fixtures/bad-chart</code>
+exits <span class="exit">1</span> and prints <code>gate: findings at or above --fail-on=high exist</code>;
+the same flag against <code>fixtures/good-chart</code> exits <span class="exit">0</span>;
+<code>--require-coverage</code> against <code>fixtures/nojvm-chart</code> exits <span class="exit">1</span>,
+because that chart runs no JVM so the JAVA category cannot be assessed.</p>
+
+<div class="danger">
+<p><span class="label">Use both</span> <code>--min-score</code> alone is a trap. The score is a weighted
+mean over the categories that <em>could</em> be assessed, so deleting an input — the Dockerfile,
+say — removes a category, renormalises the mean, and silently changes the scale your threshold
+is compared against. A chart can cross your threshold by losing a file. Pair
+<code>--min-score</code> with <code>--require-coverage</code> and that stops being possible.</p>
+</div>
+
+<p>And keep this in proportion: <code>--fail-on high</code> is a warning gate, not a merge blocker.
+It is a count of what one linter found, and <a href="limits.html">Limits</a> explains what it
+cannot count.</p>
+
+<h2 id="measured">Settle an UNDETERMINED verdict with real numbers</h2>
+
+<p>The JVM memory budget is built from five estimated components — metaspace, JIT code cache,
+thread stacks, direct buffers and GC/internal overhead. When your <code>limits.memory</code> falls
+<em>inside</em> the resulting range, the tool refuses to pick an endpoint and says so:</p>
+
+<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart
+  GRADE A+  (100.0/100)   0 critical, 0 high, 0 medium, 0 low
+  JVM fit UNDETERMINED (limit 1 GiB vs model range 722 MiB-1.2 GiB) for Deployment
+  'release-name-orders-service' / container 'orders' - not scored, and NOT a pass.
+  Settle it with `--measured metaspace=...,codecache=...,threads=...,direct=...,gc=...`.</code></pre>
+
+<p>Get the real numbers off a running pod with <code>jcmd &lt;pid&gt; VM.native_memory summary</code>
+(the report prints the exact command in its <em>Verify on your cluster</em> section), then feed
+them back. A measured component becomes <code>OBSERVED</code>, drops out of the range, and can no
+longer make the verdict undetermined.</p>
+
+<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --measured metaspace=210Mi,threads=180
+  GRADE A+  (98.3/100)   0 critical, 1 high, 0 medium, 0 low
+  JVM fit UNDETERMINED (limit 1 GiB vs model range 982 MiB-1.2 GiB) ...
+  Fix first:
+    1. [XF002] Estimated JVM footprint exceeds memory limit at typical non-heap values</code></pre>
+
+<p class="caption">Real, and worth sitting with. Two measurements narrowed the range from
+722 MiB–1.2 GiB to 982 MiB–1.2 GiB, which pushed the typical case above the 1 GiB limit and
+surfaced a HIGH finding that the wider range had been hiding. The score went <em>down</em>, from
+100.0 to 98.3, because better information found a real problem. That is the flag working, not
+the flag misbehaving.</p>
+
+<p>Sizes take <code>Ki/Mi/Gi</code> or <code>k/M/G</code>; <code>threads</code> is a plain count. Valid keys:
+<code>metaspace</code>, <code>codecache</code>, <code>threads</code>, <code>direct</code>, <code>gc</code>, <code>xss</code>.</p>
+
+<h2 id="helm">Control how the chart is rendered</h2>
+
+<p><code>--helm auto</code> is the default: use the binary if it is on <code>PATH</code>, fall back to static
+parsing if it is not. <code>--helm on</code> requires it. <code>--helm off</code> forces static mode even
+when helm is available, which is mostly useful for reproducing what a colleague without helm
+is seeing.</p>
+
+<p><code>--kube-version</code> deserves more attention than it usually gets:</p>
+
+<pre><code>python3 -m hpaanalyzer ./svc --kube-version 1.31.0</code></pre>
+
+<p>It is passed straight to <code>helm template --kube-version</code>, and it says which Kubernetes
+version the chart is being rendered <em>for</em>. Without it, the tool derives one from the
+chart's own <code>kubeVersion</code>; without that either, helm falls back to its compiled-in
+v1.20.0, which is long EOL and will refuse most modern charts. If a render fails for reasons
+that make no sense, this is the first flag to try.</p>
+
+<h2 id="crosscheck">Cross-check against the standard stack</h2>
+
+<pre><code>python3 -m hpaanalyzer ./svc --cross-check</code></pre>
+
+<p>This runs <code>helm lint</code>, <code>kubeconform</code>, <code>kube-score</code> and <code>polaris</code> — whichever are
+on your <code>PATH</code> — and folds their verbatim output into a section of the report, with a
+three-state status per tool:</p>
+
+<pre class="wide"><code>+-------------+---------+-------------------------------------------------------------+
+| Tool        | Status  | Result / reason                                             |
++=============+=========+=============================================================+
+| helm lint   | FAIL    | Error: 1 chart(s) linted, 1 chart(s) failed                 |
++-------------+---------+-------------------------------------------------------------+
+| kubeconform | UNKNOWN | 1 valid, 0 invalid, 2 not checkable, 0 skipped              |
++-------------+---------+-------------------------------------------------------------+
+| kube-score  | FAIL    | 3 object(s) scored: 9 critical, 2 warning                   |
++-------------+---------+-------------------------------------------------------------+
+| polaris     | FAIL    | score 66/100 over 1 controller(s): 3 danger, 12 warning     |
++-------------+---------+-------------------------------------------------------------+</code></pre>
+
+<p class="caption">Real output against <code>fixtures/bad-chart</code>, abridged to fit. Each tool's
+raw output is printed underneath, along with a <code>run it yourself:</code> line giving the exact
+command.</p>
+
+<p>Two design decisions in that table are worth knowing. <strong>Status is not the exit code.</strong>
+Polaris exits 0 whether it found nothing or found danger, and kube-score exits 1 both when it
+dislikes a manifest and when it could not parse one — so status is derived from each tool's own
+printed tally, and a <code>status derived from:</code> line under each tool names the signal that was
+read. <strong>UNKNOWN is a third state on purpose.</strong> It means the validator ran and could not
+reach a verdict, usually because it could not fetch a schema. Reporting that as FAIL would tell
+you your manifests are broken when nothing was actually checked.</p>
+
+<div class="danger">
+<p><span class="label">Measured</span> <strong>The cross-check section does not reproduce between
+identical runs</strong>, and containers are not the cause. Four consecutive native runs over
+<code>fixtures/bad-chart</code> produce four distinct md5 sums every time, differing by roughly 25 to 70
+lines depending on the run — the size of the disagreement is not stable either. The
+statuses and tallies are count-based and stay put — no verdict moves — but the evidence
+printed underneath reshuffles, because the tools being quoted iterate Go maps. <strong>Do not diff
+two <code>--cross-check</code> reports and read meaning into the diff.</strong> Diff the runs without it.
+Details in <a href="limits.html#reproducibility">Limits</a>.</p>
+</div>
+
+<h2 id="java">When the base image hides the Java version</h2>
+
+<p>A tag like <code>corp.registry/payments-api:4.2</code> tells the tool nothing about which JDK is
+inside. Supply it:</p>
+
+<pre><code>python3 -m hpaanalyzer ./svc --assume-java 17</code></pre>
+
+<p>Accepts <code>8</code>, <code>8u151</code>, <code>11.0.16</code>, <code>17</code> and similar. Without it the tool does not
+skip the JVM checks wholesale — heap-versus-limit arithmetic needs only the flags and the
+limit, and still runs. What degrades is the version-dependent subset: the 8u131 / 8u191 /
+8u372 and 11.0.16 cgroup-awareness boundaries. The report states which checks were reduced.</p>
+
+<p>Worth saying plainly: this flag asks <em>you</em> for something that is usually sitting in your
+repository already, in <code>pom.xml</code>, <code>build.gradle</code> or <code>.java-version</code>. Reading it from
+there is queued work, not done work.</p>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="reference.html">full flag reference</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

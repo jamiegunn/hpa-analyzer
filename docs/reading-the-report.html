@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reading an hpa-analyzer report</title>
+<meta name="description" content="What the seven sections of an hpa-analyzer report contain, what the grade actually measures, and the three ways it will mislead you.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html">Start here</a>
+      <a href="usage.html">Using it</a>
+      <a href="reading-the-report.html" aria-current="page">Reading the report</a>
+      <a href="container.html">Container</a>
+      <a href="reference.html">Reference</a>
+      <a href="limits.html">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Reading the report</h1>
+
+<p class="lede">A default report is around 900 lines and has seven numbered sections. This page
+says what each one is for, and — more usefully — which parts of it you are most likely to
+misread.</p>
+
+<div class="toc">
+  <p>On this page</p>
+  <ul>
+    <li><a href="#sections">The seven sections</a></li>
+    <li><a href="#score">1 · The score, and its scale</a></li>
+    <li><a href="#coverage">2 · Coverage: what was <em>not</em> checked</a></li>
+    <li><a href="#scorecard">3 · The scorecard</a></li>
+    <li><a href="#basis">4 · Findings, and the basis label</a></li>
+    <li><a href="#proof">5 · The proof tables</a></li>
+    <li><a href="#cluster">6 · Verify on your cluster</a></li>
+    <li><a href="#mislead">The three ways the grade will mislead you</a></li>
+  </ul>
+</div>
+
+<h2 id="sections">The seven sections</h2>
+
+<p>In order, with a header block above them naming the target directory, the timestamp, the
+chart, and every file that was actually read:</p>
+
+<table>
+<thead><tr><th>#</th><th>Section</th><th>What it is</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Executive summary</td><td>Score, grade, counts, and the fix-first list</td></tr>
+<tr><td>2</td><td>Analysis coverage</td><td>What was and was not checked, per input</td></tr>
+<tr><td>3</td><td>Scorecard by category</td><td>Ten categories, each with score, grade, weight and finding counts</td></tr>
+<tr><td>4</td><td>Findings and remediation</td><td>Grouped by severity, each with basis, math and a fix</td></tr>
+<tr><td>5</td><td>Mathematical proof tables</td><td>The arithmetic, shown rather than asserted</td></tr>
+<tr><td>6</td><td>Verify on your cluster</td><td>Commands for the gaps static analysis cannot close</td></tr>
+<tr><td>7</td><td>Methodology and limitations</td><td>How it decided what it decided</td></tr>
+</tbody>
+</table>
+
+<p>Two variations. With <code>--full</code> an education appendix is inserted as section 7 and
+methodology becomes 8. With <code>--cross-check</code> the external-validator section takes slot 7
+and methodology moves down. The numbers shift; the content does not disappear.</p>
+
+<h2 id="score">1 · The score, and its scale</h2>
+
+<pre><code>  OVERALL QUALITY SCORE :  45.5 / 100   GRADE: F
+  [#######################...........................]
+
+  What this number is: a weighted count of what THIS TOOL found. Each category starts
+  at 100 and loses points per finding. It is not an estimate of risk and not a
+  prediction that the service will hold up - a chart can score 100 and still fall
+  over, because only the things the tool knows how to look for can subtract.
+
+  Computed over         : all 10 categories (100 of 100 weight points)
+  Analysis mode         : helm</code></pre>
+
+<p>The line that does the real work is <strong>Computed over</strong>. The overall score is a weighted
+mean across the categories that could be assessed. A category the tool could not assess is not
+scored 0 and not scored 100 — there is no honest number for "not looked at" — so it leaves the
+mean entirely, numerator and denominator together. That renormalises everything else.</p>
+
+<p>Which means: <strong>two scores are comparable only when their category counts match.</strong> The
+report prints the count next to the score for exactly this reason, and
+<a href="usage.html#ci"><code>--require-coverage</code></a> is how you enforce it in CI.</p>
+
+<p>The deduction model is fixed and stated in the report: each category starts at 100 and loses
+25 per CRITICAL, 12 per HIGH, 6 per MEDIUM, 3 per LOW, 0 per INFO, floored at 0.</p>
+
+<h2 id="coverage">2 · Coverage: what was <em>not</em> checked</h2>
+
+<p>This is the section people skip and should not. Its opening sentence is the whole argument:</p>
+
+<blockquote>
+<p>Findings can only come from files that were successfully analyzed. Anything marked as failed,
+skipped or unknown below produced NO findings — treat that as missing coverage, never as a
+clean bill of health.</p>
+</blockquote>
+
+<p>In a report that lists only failures, an unrun check and a passed check look identical. The
+coverage table is what separates them: a row per input, saying whether it was rendered by helm,
+statically parsed, or not read at all — and when it names a subchart, it names the subchart's
+kinds and object names rather than counting them.</p>
+
+<h2 id="scorecard">3 · The scorecard</h2>
+
+<pre class="wide"><code>+----------------------------------------+-------+-------+--------+--------------------+
+| Category                               | Score | Grade | Weight | Findings (C/H/M/L) |
++========================================+=======+=======+========+====================+
+| Helm Chart Structure &amp; Hygiene         |  49.0 | F     | 4      | 2H, 2M, 5L         |
+| Kubernetes Templates &amp; API Versions    |  35.0 | F     | 5      | 2C, 1M, 3L         |
+| Resource Requests &amp; Limits             |  32.0 | F     | 15     | 2C, 1H, 1M         |
+| Horizontal Pod Autoscaling             |  20.0 | F     | 15     | 3C, 1H, 2L         |
+| Availability &amp; Disruption Tolerance    |  79.0 | C+    | 8      | 3M, 1L             |
+| Health Probes &amp; Lifecycle              |  70.0 | C-    | 10     | 1H, 3M             |
+| Dockerfile Quality                     |  66.0 | D     | 8      | 1C, 1M, 1L         |
+| Java / JVM Container Fitness           |  21.0 | F     | 14     | 1C, 3H, 2M, 2L     |
+| Security Posture                       |  52.0 | F     | 7      | 3H, 1M, 2L         |
+| Cross-File Consistency (Chart &lt;-&gt; JVM) |  63.0 | D     | 14     | 2C                 |
++----------------------------------------+-------+-------+--------+--------------------+</code></pre>
+
+<p class="caption">Real scorecard for <code>fixtures/bad-chart</code>, borders trimmed to fit. The
+weights sum to 100 and are the tool's opinion about what breaks production: resources, HPA,
+cross-file consistency and JVM fitness together carry 58 of the 100 points.</p>
+
+<p>A category can read <code>NOT ASSESSED</code>. That is not a pass. It means the inputs that category
+needs were absent — and the reason line will list every input that was examined, so you can see
+which one to add.</p>
+
+<h2 id="basis">4 · Findings, and the basis label</h2>
+
+<p>Every finding carries the same anatomy: category and file, a <strong>basis</strong>, what was
+<strong>found</strong>, <strong>why</strong> it matters, the <strong>math</strong> where there is any, and a <strong>fix</strong>.</p>
+
+<pre><code>[HP004] HPA minReplicas &gt; maxReplicas (invalid)
+    Category: Horizontal Pod Autoscaling | templates/hpa.yaml
+    Basis : OBSERVED - read directly from your files (stated as fact).
+    Found : [with values overlay values-prod.yaml] HPA 'release-name-payments':
+            minReplicas=25 &gt; maxReplicas=20.
+    Why   : Invalid object - the API server rejects it, so the workload has NO
+            autoscaling and helm upgrade fails.
+    Math  : Constraint violated: 25 &lt;= 20 is false.
+    Fix   : Make min &lt;= max.</code></pre>
+
+<p>The basis label is the tool's confidence, made explicit rather than implied by tone:</p>
+
+<table>
+<thead><tr><th>Basis</th><th>Means</th><th>How to treat it</th></tr></thead>
+<tbody>
+<tr><td><code>OBSERVED</code></td><td>Read directly from your files</td><td>Stated as fact. Act on it.</td></tr>
+<tr><td><code>DERIVED</code></td><td>Computed from what was read, using a documented model</td><td>Check the proof table it points at.</td></tr>
+<tr><td><code>ASSUMED</code></td><td>Could not be observed; the tool fell back to a guess</td><td>Verify before acting — an <code>Assumes:</code> line names the guess and says what happens if it is wrong.</td></tr>
+</tbody>
+</table>
+
+<p>An <code>ASSUMED</code> finding names its own escape hatch. Here is one, in full, from the same
+report:</p>
+
+<pre><code>[HP025] HPA scales on memory for a JVM workload
+    Basis  : ASSUMED - the tool could not observe this directly and fell back to a
+             guess; verify before acting (see Assumes).
+    Assumes: the workload this HPA targets is the Java service (inferred from a single
+             workload + a Java Dockerfile; the HPA's target was not resolvable by name)
+             - if that is wrong, this finding does not apply.</code></pre>
+
+<p>That finding is also a fair example of what the tool is <em>for</em>. Its <code>Why</code> is not "memory
+metrics are discouraged" but an argument: a JVM's committed heap stays near its high-water mark,
+so measured utilisation stays high after load drops, so the scale-down condition is unreachable
+and the HPA ratchets to <code>maxReplicas</code> and stays there. The <code>Math</code> line then shows the
+inequality that never becomes true.</p>
+
+<h2 id="proof">5 · The proof tables</h2>
+
+<p>Seven tables in a typical run. They exist so you can disagree with the tool using arithmetic
+rather than intuition. The JVM memory budget is the one to read first:</p>
+
+<pre class="wide"><code>Container memory must hold the WHOLE JVM, not just the heap. Estimation model:
+T = H + Metaspace + CodeCache + threads*Xss + DirectBuffers + GC/internal.
+JVM visibility of the limit: 8u151 without applied experimental cgroup flags.
+
++--------------------------+-------------------+------------------------------------------+
+| Component                | Size              | Basis                                    |
++==========================+===================+==========================================+
+| Container memory limit   | NOT SET           | -                                        |
+| Max heap (H)             | 4 GiB             | JVM CANNOT see the limit (8u151 without  |
+|                          |                   | applied experimental cgroup flags);      |
+|                          |                   | default 25% x assumed node RAM 16 GiB    |
+| Metaspace (est.)         | 128 MiB           | est. 128 MiB, range 80 MiB-180 MiB       |
+| JIT code cache (est.)    | 64 MiB            | est. 64 MiB, range 32 MiB-128 MiB        |
+| Thread stacks (est.)     | 100 MiB           | est. 100 MiB, range 50 MiB-200 MiB       |
+|   Thread count (est.)    | 100 (est. 50-200) | Spring Boot's embedded Tomcat defaults   |
+|                          |                   | to server.tomcat.threads.max=200         |
+|   Thread stack size      | 1 MiB             | HotSpot default on Linux x86-64; a       |
+|                          |                   | documented platform default, not an      |
+|                          |                   | estimate, so its band has zero width     |
+| Direct buffers (est.)    | 64 MiB            | est. 64 MiB, range 16 MiB-128 MiB        |
++--------------------------+-------------------+------------------------------------------+</code></pre>
+
+<p class="caption">Real table for <code>fixtures/bad-chart</code>, abridged. Every estimate carries a
+band and a cited reason for the band.</p>
+
+<p>Note what the "Max heap" row is doing. The Dockerfile says Java 8u151, which predates
+container-awareness being on by default, so the JVM cannot see the cgroup limit and sizes its
+heap from the <em>node's</em> RAM instead — 25% of an assumed 16 GiB, giving a 4 GiB heap inside a
+container that was never given a memory limit at all. That is the class of bug this tool exists
+to find, and the table is how it shows its working.</p>
+
+<p>Components marked <code>(est.)</code> are estimates. Feed real numbers back with
+<a href="usage.html#measured"><code>--measured</code></a> and they become <code>OBSERVED</code> and drop out of the
+range. And keep the honest framing in view: <strong>the proof-table numbers are arithmetic on
+estimates, not measurements.</strong></p>
+
+<h2 id="cluster">6 · Verify on your cluster</h2>
+
+<p>The tool reads files, not a cluster. This section lists each real Kubernetes behaviour it
+cannot see, with the command that closes the gap and instructions for reading the answer.
+Only the checks relevant to <em>your</em> chart appear, with names and selectors filled in:</p>
+
+<pre><code>[metrics-pipeline] Will the HPA actually scale?
+    Gap  : Static files cannot show whether metrics-server / a custom-metrics adapter
+           is installed, or the HPA's live status.
+    Run  :
+        $ kubectl describe hpa release-name-payments -n &lt;namespace&gt;
+        $ kubectl top pods -n &lt;namespace&gt; -l app=payments
+    Read : In `describe hpa`, the Conditions block must show `ScalingActive True`.
+           `AbleToScale False` / `FailedGetResourceMetric` means the metrics API is not
+           serving this HPA - install/repair metrics-server.</code></pre>
+
+<p>The <code>limitrange</code> probe in the same section matters more than it looks: a namespace
+LimitRange can inject requests and limits that this report flags as absent, changing the real
+QoS class. A "no requests" finding can be a false positive for exactly that reason, and the tool
+cannot see it from your files.</p>
+
+<h2 id="mislead">The three ways the grade will mislead you</h2>
+
+<div class="warn">
+<p><span class="label">One</span> <strong>It is a count of what this tool found, not a measure of
+risk.</strong> Nothing subtracts for a problem the tool has no rule for. A chart can score 100 and
+still fall over.</p>
+</div>
+
+<div class="warn">
+<p><span class="label">Two</span> <strong>It is not comparable across runs by default.</strong> Losing an
+input removes a category and renormalises the mean. Compare only when the "computed over" counts
+match, and enforce that with <code>--require-coverage</code>.</p>
+</div>
+
+<div class="warn">
+<p><span class="label">Three</span> <strong>An <code>A+</code> is a statement about the files.</strong> It is not a
+promise the workload will schedule, scale, or even be admitted on your cluster. Note that
+<code>fixtures/good-chart</code> scores 100.0 <em>and</em> carries an <code>UNDETERMINED</code> JVM fit verdict at
+the same time — the report says outright that this is "not scored, and NOT a pass".</p>
+</div>
+
+<p>More of this, in detail and with the measurements behind it, on the
+<a href="limits.html">Limits</a> page.</p>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer/tree/main/sample_reports">sample reports</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

@@ -12,6 +12,7 @@ hpa_analysis_report.txt
 # Agent / editor / test caches (local only)
 .claude/
 .pytest_cache/
+.p11_tmp/
 
 # Internal adversarial-review materials — NOT for publication
 trial/

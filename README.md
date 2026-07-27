@@ -19,6 +19,18 @@ python3 hpa-analyzer.py ./my-service
 #     ...
 ```
 
+**Documentation:** the how-to-use guide lives at
+**<https://jamiegunn.github.io/hpa-analyzer/>** — install and first run,
+[using it](https://jamiegunn.github.io/hpa-analyzer/usage.html) (verbosity,
+CI gates, `--measured`, `--cross-check`), [reading the
+report](https://jamiegunn.github.io/hpa-analyzer/reading-the-report.html),
+the [container path](https://jamiegunn.github.io/hpa-analyzer/container.html),
+a [flag reference](https://jamiegunn.github.io/hpa-analyzer/reference.html),
+and [what it cannot
+do](https://jamiegunn.github.io/hpa-analyzer/limits.html). Every transcript,
+table and figure on that site is re-derived from the running program by
+`proof/p11_docsite.py`, which fails if a page and the program disagree.
+
 ---
 
 ## Honest assessment — read this first
@@ -142,6 +154,21 @@ version.
   substitutes a canned render on purpose: it tests mode *selection* logic, not
   helm. Tool versions differ;
   confirm against your own installed versions before relying on them in CI.
+* **The report is a function of your `PATH`, and one section of it does not
+  reproduce even on the same machine.** Both halves are measured. With `helm`
+  absent the same chart's `Analysis mode` drops to `static`, every coverage row
+  is rewritten, and HP050 loses a word — so two people on the same commit can
+  hold different reports and neither is wrong. The container path (*R10*,
+  `bin/hpa-analyzer` + `docker/Dockerfile`, see `docs/DOCKER.md`) pins the four
+  binaries and makes that variable explicit; it does not make the pinned
+  answer the *right* one for your cluster's Helm. Worse, and unfixed: the
+  `--cross-check` section reshuffles between identical runs, natively, because
+  kube-score, polaris and kubeconform print out of Go maps. Four consecutive
+  native runs of `fixtures/bad-chart` gave four distinct md5s, differing by
+  51–65 lines. No verdict or tally moves — those are count-based — but the
+  evidence under them does, so **do not diff two `--cross-check` reports and
+  read meaning into the diff**. This is logged as R11 in `docs/ITERATIONS.md`,
+  not solved.
 * **Scope is deliberately narrow.** One chart per run; it is a JVM/HPA/
   resources linter, not a general Kubernetes validator, schema checker, or
   security scanner. Subcharts are **not graded** — a vendored chart is
@@ -190,6 +217,13 @@ version.
   behaviour), and the report says which. Note also that this flag asks *you*
   for something usually sitting in your repo (`pom.xml`, `build.gradle`,
   `.java-version`); reading it instead is queued, not done.
+* **Running it in the container makes the answer reproducible, not correct.**
+  The image pins helm 3.16.4 and three validators; if your cluster runs a
+  different Helm, the pinned render is reproducibly the wrong one and the tool
+  cannot tell. Nor was the shipped image itself proven equivalent to a native
+  run — the byte-identity measurement used a locally assembled stand-in,
+  because no registry was reachable from the machine this was built on.
+  `docs/DOCKER.md` says exactly what that does and does not establish.
 * **A `NOT ASSESSED` category is not a pass, and a missing finding is not
   either.** After R8 the tool deliberately prints "the JVM checks did not
   apply, and here is what would make them apply" rather than going quiet,
@@ -207,6 +241,9 @@ section, and the "Verify on your cluster" commands are for.
 * Python 3.8+ and PyYAML (`pip install -r requirements.txt`)
 * **Recommended:** `helm` on PATH → the chart is rendered by the real
   template engine (`helm template`) instead of statically scrubbed.
+* **Alternative to both:** `docker` (or `podman` / `nerdctl`) and
+  `bin/hpa-analyzer`, which runs a build with the whole toolchain pinned —
+  see *Or run it from a container* below.
 
 ## Getting started
 
@@ -232,6 +269,39 @@ section, and the "Verify on your cluster" commands are for.
 
 First time? Run `python3 hpa-analyzer.py <dir> --check` to confirm the tool
 found your chart/values/Dockerfile before analyzing.
+
+### Or run it from a container, with the toolchain pinned
+
+The report you get depends on what is on your `PATH` — with `helm` absent the
+same chart's `Analysis mode` drops from `helm (rendered truth)` to `static`,
+every coverage row changes, and one finding is reworded. Two people on the same
+commit can therefore exchange different reports and both be right. If you care
+about that, run the containerised build instead:
+
+```bash
+docker build -f docker/Dockerfile -t hpa-analyzer:latest .
+install -m 0755 bin/hpa-analyzer /usr/local/bin/hpa-analyzer
+
+hpa-analyzer /path/to/your/service --fail-on high
+```
+
+`bin/hpa-analyzer` is a bash wrapper around `docker run`, and the whole point
+of it is that you should not have to know that: every flag works unchanged, the
+exit codes are the analyzer's own, and the report is **byte-identical** to the
+native one — 62704 vs 62704 bytes on the test fixture, absolute paths included
+— because every host path is mounted at its own path. On first run it asks once
+where reports should go and remembers the answer in
+`~/.config/hpa-analyzer/config`, re-exposed as `$HPA_ANALYZER_OUTPUT_DIR`; that
+sets the **default** only, and an explicit `-o`/`--json`/`--html` always wins.
+With no terminal (CI, cron, a pipe) it does not ask — it uses `$PWD` and says
+so on stderr.
+
+Two caveats you should read before trusting it, both stated in full in
+[docs/DOCKER.md](docs/DOCKER.md): the byte-identity above was measured against
+an image assembled locally rather than the real pinned build, so it proves the
+*wrapper* transparent and says nothing about whether helm 3.16.4 agrees with
+your helm; and `--cross-check` output is not reproducible run to run **even
+natively**, because the tools it quotes iterate Go maps.
 
 ### How much detail? (verbosity)
 
@@ -403,9 +473,32 @@ the report's scorecard for the full per-category breakdown.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .     # 412 tests
+python3 -m unittest discover -s tests -t .     # 427 tests
 python3 proof/p5_grade.py                      # each proof/p*.py exits 0 or explains why not
 ```
+
+`-t .` is not optional: `discover -s tests` on its own loads the test modules
+as top-level names, and the five that use `from .util import …` then fail with
+`attempted relative import with no known parent package` while the run reports
+243 tests instead of 412. That is a discovery-root artefact, not a regression —
+worth knowing before you go looking for a bug that is not there.
+
+`proof/p10_harness.py` checks the container wrapper. Its argument-scan and
+output-directory claims run anywhere (they use `HPA_ANALYZER_DRY_RUN=1` and
+need no image at all); the byte-identity and exit-code claims need a running
+daemon and an image, and **announce themselves as skipped** rather than passing
+quietly when there is none. Point it at a real build with
+`HPA_PROOF_IMAGE=hpa-analyzer:latest python3 proof/p10_harness.py` after
+`docker build -f docker/Dockerfile -t hpa-analyzer:latest .`.
+
+`tests/test_harness.py` holds the 15 of those checks that belong in the
+regression net rather than in a proof, because the wrapper's argument scan is a
+**second parser duplicating `argparse` in bash** — add a value-taking flag to
+`__main__.py`, forget `VALUE_FLAGS` in the wrapper, and `--new-flag foo ./svc`
+mounts `foo` and analyzes it. Every claim there about the positional directory
+is compared against the real `argparse` namespace, not against a reading of it,
+and six deliberate mutations of the wrapper were used to confirm the tests can
+fail at all.
 
 133 distinct rule IDs are emitted. 128 of them live in
 `hpaanalyzer/checks_*.py` (AV 6, CH 24, DF 15, HP 23, JV 17, LC 1, PA 1,
@@ -428,15 +521,23 @@ that has one. They were found by a Bar 2 proof enumerating every
 reader-visible surface by hand, not by the test suite, and nothing would yet
 catch a fourteenth.
 
-`proof/` holds 21 standalone scripts, one per defect fixed in the nine
+`proof/` holds 23 standalone scripts, one per defect fixed in the ten
 documented iterations. Each extracts the pre-fix tree at a **pinned** commit
 (`proof/baseline.py`, not `HEAD`), runs both versions as real subprocesses
 over real fixture directories, and prints the before/after measurement rather
-than asserting the claim. One exception is labelled as such in its own output:
+than asserting the claim. Two are labelled as exceptions in their own output:
 `p5c_horizon.py` fixes a defect that was introduced *and* fixed after the
 baseline commit, so there is no old tree to archive; its BEFORE column is
 reconstructed by disabling one field, and the script says so before printing a
-number. Several of them record where the first draft of a claim was **refuted
+number. `p10_harness.py` has no before/after at all — R10 changed nothing in
+`hpaanalyzer/` — so it measures the containerised command against the native
+one instead, and names the limits of what that can establish up front.
+`p11_docsite.py` is a third: it has no before/after either, because the
+documentation site is not a defect that was fixed but a set of claims about
+the program — so it re-derives every checkable claim on `docs/*.html` from the
+running program (flag round-trip against `--help` in both directions, every
+transcript re-executed, every quoted figure recomputed, every internal link
+and `#anchor` resolved) and fails if a page disagrees. Several of them record where the first draft of a claim was **refuted
 by its own run** and corrected from the measurement — that history is in
 `docs/ITERATIONS.md` and is deliberately not tidied away.
 

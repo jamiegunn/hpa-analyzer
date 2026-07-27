@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hpa-analyzer reference</title>
+<meta name="description" content="Every hpa-analyzer flag, every exit code, the JSON output shape, and the ten scoring categories.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html">Start here</a>
+      <a href="usage.html">Using it</a>
+      <a href="reading-the-report.html">Reading the report</a>
+      <a href="container.html">Container</a>
+      <a href="reference.html" aria-current="page">Reference</a>
+      <a href="limits.html">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Reference</h1>
+
+<p class="lede">Every flag, every exit code, the JSON shape, and the scoring model. Generated
+from <code>hpa-analyzer --help</code> at version 1.0.0 and checked against real runs.</p>
+
+<div class="toc">
+  <p>On this page</p>
+  <ul>
+    <li><a href="#synopsis">Synopsis</a></li>
+    <li><a href="#output">Output &amp; verbosity</a></li>
+    <li><a href="#analysis">Analysis</a></li>
+    <li><a href="#gates">CI gates &amp; machine output</a></li>
+    <li><a href="#ecosystem">Ecosystem</a></li>
+    <li><a href="#exit">Exit codes</a></li>
+    <li><a href="#json">JSON output</a></li>
+    <li><a href="#categories">The ten scoring categories</a></li>
+    <li><a href="#layout">Project layout it expects</a></li>
+  </ul>
+</div>
+
+<h2 id="synopsis">Synopsis</h2>
+
+<pre class="wide"><code>usage: hpa-analyzer [-h] [-o OUTPUT] [--html [PATH]] [--summary | --full]
+                    [--all] [--teach] [--stdout] [--quiet]
+                    [--helm {auto,on,off}] [--kube-version VER]
+                    [--assume-java VER] [--measured K=V[,K=V]] [--check]
+                    [--fail-on {none,low,medium,high,critical}]
+                    [--min-score N] [--require-coverage] [--json PATH]
+                    [--cross-check] [--version]
+                    directory</code></pre>
+
+<p>The single positional argument is the directory containing the chart, values and — optionally
+— a Dockerfile. It is required; running with no arguments is an argparse usage error that exits
+<span class="exit">2</span>.</p>
+
+<p>Three ways to invoke the same program:</p>
+
+<pre><code>python3 -m hpaanalyzer ./svc      # module form, used throughout these docs
+python3 hpa-analyzer.py ./svc     # shim, identical behaviour
+hpa-analyzer ./svc                # the container wrapper, see the Container page</code></pre>
+
+<h2 id="output">Output &amp; verbosity</h2>
+
+<table class="flagtable">
+<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>-o OUTPUT</code>, <code>--output OUTPUT</code></td>
+    <td>Text report path. Default <code>hpa_analysis_report.txt</code> in the current directory.</td></tr>
+<tr><td><code>--html [PATH]</code></td>
+    <td>Also write a browsable HTML report with a filter, collapsible sections and a table of
+    contents. <code>PATH</code> is optional and defaults to the <code>-o</code> path with a <code>.html</code>
+    extension. Because the argument is optional, put this flag last or give it an explicit
+    path.</td></tr>
+<tr><td><code>--summary</code></td>
+    <td>Short report: score, scorecard and the top CRITICAL/HIGH findings only. Mutually
+    exclusive with <code>--full</code>.</td></tr>
+<tr><td><code>--full</code></td>
+    <td>Everything: expands LOW/INFO and includes the education appendix. Implies
+    <code>--all --teach</code>.</td></tr>
+<tr><td><code>--all</code></td>
+    <td>Expand LOW/INFO findings to full detail. The default collapses them to one line each.</td></tr>
+<tr><td><code>--teach</code></td>
+    <td>Include the education appendix (HPA/JVM primer), omitted from the default report.</td></tr>
+<tr><td><code>--stdout</code></td>
+    <td>Also print the full text report to standard output.</td></tr>
+<tr><td><code>--quiet</code></td>
+    <td>Terminal only: print the one-line result and suppress the banner and fix-first summary.
+    Does not change the report file.</td></tr>
+</tbody>
+</table>
+
+<p>Measured report sizes for <code>fixtures/bad-chart</code> (60 findings), with <code>helm</code> on
+<code>PATH</code>: <code>--summary</code> 167 lines, default 906, <code>--all</code> 1018, <code>--full</code> 1238.
+Without <code>helm</code> the same runs measure 170, 919, 1031 and 1251 — static mode is a longer
+report, not a shorter one. See <a href="usage.html#verbosity">Using it</a>.</p>
+
+<h2 id="analysis">Analysis</h2>
+
+<table class="flagtable">
+<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>--helm {auto,on,off}</code></td>
+    <td>Render via the helm binary. <code>auto</code> (default) uses it if it is on <code>PATH</code>;
+    <code>on</code> requires it; <code>off</code> forces static analysis.</td></tr>
+<tr><td><code>--kube-version VER</code></td>
+    <td>Kubernetes version to render the chart <em>for</em>, e.g. <code>1.31.0</code>. Passed to
+    <code>helm template --kube-version</code>. Without it the tool derives one from the chart's own
+    <code>kubeVersion</code>; without that, helm falls back to its compiled-in v1.20.0, which is EOL
+    and will refuse most modern charts.</td></tr>
+<tr><td><code>--assume-java VER</code></td>
+    <td>Java version to assume when the base image tag hides it, e.g. <code>8</code>, <code>8u151</code>,
+    <code>11.0.16</code>, <code>17</code>.</td></tr>
+<tr><td><code>--measured K=V[,K=V]</code></td>
+    <td>Replace an estimated JVM memory component with a number you measured. Keys:
+    <code>metaspace</code>, <code>codecache</code>, <code>threads</code>, <code>direct</code>, <code>gc</code>, <code>xss</code>. Sizes take
+    <code>Ki/Mi/Gi</code> or <code>k/M/G</code>; <code>threads</code> is a plain count. A measured component becomes
+    <code>OBSERVED</code>, drops out of the budget's range, and stops being able to make the fit
+    <code>UNDETERMINED</code>.</td></tr>
+<tr><td><code>--check</code></td>
+    <td>Input check only: report what was discovered and what looks misplaced, then exit
+    without analyzing. Exits <span class="exit">2</span> if it is not a chart directory.</td></tr>
+</tbody>
+</table>
+
+<h2 id="gates">CI gates &amp; machine output</h2>
+
+<table class="flagtable">
+<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>--fail-on {none,low,medium,high,critical}</code></td>
+    <td>Exit <span class="exit">1</span> if any finding at or above this severity exists.</td></tr>
+<tr><td><code>--min-score N</code></td>
+    <td>Exit <span class="exit">1</span> if the score is below N. An ungradeable run also fails.
+    The score is a weighted mean over the categories that could be assessed, so a run that
+    loses an input is compared on a different scale — pair this with
+    <code>--require-coverage</code>.</td></tr>
+<tr><td><code>--require-coverage</code></td>
+    <td>Exit <span class="exit">1</span> if any scoring category could not be assessed. Without
+    it, deleting an input silently changes the scale the threshold is compared against.</td></tr>
+<tr><td><code>--json PATH</code></td>
+    <td>Also write machine-readable findings to <code>PATH</code>.</td></tr>
+</tbody>
+</table>
+
+<h2 id="ecosystem">Ecosystem</h2>
+
+<table class="flagtable">
+<thead><tr><th>Flag</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>--cross-check</code></td>
+    <td>Also run <code>helm lint</code>, <code>kubeconform</code>, <code>kube-score</code> and <code>polaris</code> (whichever
+    are on <code>PATH</code>) and fold their verbatim output into the report. See the
+    <a href="limits.html#reproducibility">reproducibility warning</a>.</td></tr>
+<tr><td><code>-h</code>, <code>--help</code></td><td>Show help and exit <span class="exit">0</span>.</td></tr>
+<tr><td><code>--version</code></td><td>Print <code>hpa-analyzer 1.0.0</code> and exit <span class="exit">0</span>.</td></tr>
+</tbody>
+</table>
+
+<h2 id="exit">Exit codes</h2>
+
+<p>Three codes, and nothing else. Every row below was measured.</p>
+
+<table>
+<thead><tr><th>Code</th><th>Meaning</th><th>Measured example</th></tr></thead>
+<tbody>
+<tr><td><span class="exit">0</span></td><td>Ran successfully. Findings are not errors.</td>
+    <td><code>hpaanalyzer fixtures/bad-chart</code> — 60 findings, grade F, exit 0</td></tr>
+<tr><td><span class="exit">1</span></td><td>A gate you asked for failed</td>
+    <td><code>--fail-on high</code> on <code>fixtures/bad-chart</code>;
+        <code>--require-coverage</code> on <code>fixtures/nojvm-chart</code></td></tr>
+<tr><td><span class="exit">2</span></td><td>Usage or IO error</td>
+    <td>No arguments at all; <code>./nope</code> → <code>error: /nope is not a directory</code>;
+        <code>--check</code> on a directory that is not a chart</td></tr>
+</tbody>
+</table>
+
+<p>Only <code>--fail-on</code>, <code>--min-score</code> and <code>--require-coverage</code> can produce
+<span class="exit">1</span>. If you want a run that never fails a pipeline, simply omit them.</p>
+
+<h2 id="json">JSON output</h2>
+
+<p><code>--json PATH</code> writes an object with these top-level keys:</p>
+
+<table>
+<thead><tr><th>Key</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>target</code></td><td>Absolute path of the analyzed directory</td></tr>
+<tr><td><code>mode</code></td><td><code>helm</code> or <code>static</code></td></tr>
+<tr><td><code>score</code>, <code>grade</code>, <code>graded</code></td><td>The number, the letter, and whether a grade could be produced at all</td></tr>
+<tr><td><code>score_coverage</code></td><td><code>assessed</code>, <code>unassessed</code>, <code>weight_assessed</code>, <code>weight_total</code>, <code>complete</code>, <code>note</code></td></tr>
+<tr><td><code>counts</code></td><td>Per-severity totals: <code>critical</code>, <code>high</code>, <code>medium</code>, <code>low</code>, <code>info</code></td></tr>
+<tr><td><code>findings</code></td><td>The array — shape below</td></tr>
+<tr><td><code>coverage</code></td><td>Per-input coverage rows, mirroring report section 2</td></tr>
+<tr><td><code>cluster_probes</code></td><td>The "verify on your cluster" items</td></tr>
+<tr><td><code>preflight</code></td><td>What the input check found</td></tr>
+<tr><td><code>cross_check</code></td><td>External validator results, populated only with <code>--cross-check</code></td></tr>
+</tbody>
+</table>
+
+<p>A finding, verbatim from a real run:</p>
+
+<pre><code>{
+ "rule": "CH002",
+ "severity": "MEDIUM",
+ "basis": "observed",
+ "assumes": null,
+ "category": "Helm Chart Structure &amp; Hygiene",
+ "title": "Chart apiVersion v1 (Helm 2 era)",
+ "file": "Chart.yaml",
+ "line": null,
+ "detail": "Chart.yaml declares apiVersion: v1.",
+ "why": "apiVersion v1 targets Helm 2, which reached end of life in Nov 2020 (no security fixes). ...",
+ "fix": "Set apiVersion: v2 and manage dependencies via the 'dependencies' key ...",
+ "math": null
+}</code></pre>
+
+<p><code>severity</code> is one of <code>CRITICAL</code>, <code>HIGH</code>, <code>MEDIUM</code>, <code>LOW</code>, <code>INFO</code>.
+<code>basis</code> is one of <code>observed</code>, <code>derived</code>, <code>assumed</code>; when it is <code>assumed</code>, the
+<code>assumes</code> field carries the guess in prose. <code>line</code> and <code>math</code> are frequently
+<code>null</code> — treat both as optional.</p>
+
+<h2 id="categories">The ten scoring categories</h2>
+
+<p>Each starts at 100 and loses 25 per CRITICAL, 12 per HIGH, 6 per MEDIUM, 3 per LOW and 0 per
+INFO, floored at 0. The overall score is the weighted mean over the categories that could be
+assessed.</p>
+
+<table>
+<thead><tr><th>Category</th><th>Weight</th></tr></thead>
+<tbody>
+<tr><td>Resource Requests &amp; Limits</td><td>15</td></tr>
+<tr><td>Horizontal Pod Autoscaling</td><td>15</td></tr>
+<tr><td>Java / JVM Container Fitness</td><td>14</td></tr>
+<tr><td>Cross-File Consistency (Chart ↔ JVM)</td><td>14</td></tr>
+<tr><td>Health Probes &amp; Lifecycle</td><td>10</td></tr>
+<tr><td>Availability &amp; Disruption Tolerance</td><td>8</td></tr>
+<tr><td>Dockerfile Quality</td><td>8</td></tr>
+<tr><td>Security Posture</td><td>7</td></tr>
+<tr><td>Kubernetes Templates &amp; API Versions</td><td>5</td></tr>
+<tr><td>Helm Chart Structure &amp; Hygiene</td><td>4</td></tr>
+</tbody>
+</table>
+
+<p>The weights are the tool's opinion about what breaks production. Resources, HPA, JVM fitness
+and cross-file consistency carry 58 of the 100 points between them.</p>
+
+<h2 id="layout">Project layout it expects</h2>
+
+<pre><code>my-service/
+├── Chart.yaml            # required
+├── values.yaml           # required
+├── values-prod.yaml      # optional overlays, analyzed as overlays
+├── templates/
+│   ├── deployment.yaml
+│   ├── hpa.yaml
+│   └── ...
+└── Dockerfile            # optional since R8</code></pre>
+
+<p>The Dockerfile is optional: a JVM declared only in the pod spec — through
+<code>JAVA_TOOL_OPTIONS</code>, or a <code>temurin</code>/<code>corretto</code> image — is analyzed just as fully, and a
+chart that ships a Dockerfile but runs no JVM is no longer lectured about heap flags. Run
+<code>--check</code> to see exactly which files were found before you rely on any of this.</p>
+
+<p>One chart per run. Subcharts under <code>charts/</code> are rendered and recorded but never graded —
+see <a href="limits.html#scope">Scope</a> for why, and for what that costs you.</p>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/SPEC.md">docs/SPEC.md</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

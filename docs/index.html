@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hpa-analyzer — how to use it</title>
+<meta name="description" content="How to use hpa-analyzer: a static analyzer for Helm charts, resource requests/limits, HPA correctness, and how a JVM will behave inside its container's cgroup.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html" aria-current="page">Start here</a>
+      <a href="usage.html">Using it</a>
+      <a href="reading-the-report.html">Reading the report</a>
+      <a href="container.html">Container</a>
+      <a href="reference.html">Reference</a>
+      <a href="limits.html">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Start here</h1>
+
+<p class="lede">hpa-analyzer reads a directory containing a Helm chart, its values files and
+— optionally — a Dockerfile, and writes a plain-text report about three things:
+whether the HPA arithmetic actually works, whether the requests and limits are
+coherent, and how a JVM will behave inside the cgroup you gave it. The last one
+is the part no other tool in the standard stack checks.</p>
+
+<div class="note">
+<p><span class="label">Read first</span> This tool is a linter, not an oracle. Everything on this
+site is written from measured runs of the code in this repository, and the page that
+matters most is <a href="limits.html">Limits</a> — what it does not do, and what a clean report
+does not prove. If you only read two pages, read this one and that one.</p>
+</div>
+
+<h2>Install</h2>
+
+<p>Python 3.8 or newer, plus PyYAML. That is the whole dependency list.</p>
+
+<pre><code>git clone https://github.com/jamiegunn/hpa-analyzer.git
+cd hpa-analyzer
+pip install -r requirements.txt</code></pre>
+
+<p>Two entry points exist and they are the same program — <code>python3 hpa-analyzer.py</code>
+is a thin shim over <code>python3 -m hpaanalyzer</code>. This site uses the module form
+throughout because it is the one that works from any directory once the repo is on
+your <code>PYTHONPATH</code>.</p>
+
+<p><strong>Install <code>helm</code> too, if you can.</strong> With <code>helm</code> on your <code>PATH</code> the chart is
+rendered by the real template engine and the report says <code>helm (rendered truth)</code>.
+Without it the tool falls back to static parsing, says so, and rewrites its coverage
+table to mark every input as statically parsed. Both modes work. They do not always
+produce the same findings, and that difference is a fact about the tool you should know
+before two people compare reports — see <a href="limits.html#path">Your PATH changes the answer</a>.</p>
+
+<p>There is a third option that removes the <code>PATH</code> question entirely: run it from a
+container with the whole toolchain pinned, behind a shell wrapper that keeps every
+flag working. That is <a href="container.html">its own page</a>.</p>
+
+<h2>First run</h2>
+
+<p>Before analyzing anything, ask the tool what it found. <code>--check</code> reports what it
+discovered and what looks misplaced, then exits without analyzing.</p>
+
+<pre><code>$ python3 -m hpaanalyzer fixtures/good-chart --check
+INPUT CHECK - /home/you/hpa-analyzer/fixtures/good-chart
+-----------------------------------------------------------
+  [ok]   Helm chart: Chart.yaml
+  [ok]   Values: values.yaml
+  [ok]   Templates: 7 file(s) under templates/
+  [ok]   Workloads: 1 (Deployment)
+  [ok]   Dockerfile: Dockerfile (Java 21)
+  [info] Render mode: helm (rendered truth).
+
+  =&gt; Looks complete. Analysis will run at full coverage.</code></pre>
+
+<p class="caption">Real output, exit code 0. If the directory is not a chart directory at all,
+<code>--check</code> ends with <code>=&gt; Not a chart directory. Fix the path above and re-run.</code> and
+exits <span class="exit">2</span>.</p>
+
+<p>This step exists because the most expensive failure mode of a static analyzer is a
+clean report produced from files it never read. Confirm the inputs first, then analyze.</p>
+
+<h2>Analyze</h2>
+
+<pre><code>$ python3 -m hpaanalyzer fixtures/bad-chart
+  [ok]   Helm chart: Chart.yaml
+  [ok]   Values: values.yaml (+ 1 overlay: values-prod.yaml)
+  [ok]   Templates: 3 file(s) under templates/
+  [ok]   Workloads: 1 (Deployment)
+  [ok]   Dockerfile: Dockerfile (Java 8u151)
+  [info] Render mode: helm (rendered truth).
+  [warn] 1 parse problem(s).
+
+  GRADE F  (45.5/100)   11 critical, 11 high, 14 medium, 16 low
+  Fix first:
+    1. [HP004] HPA minReplicas &gt; maxReplicas (invalid)  (templates/hpa.yaml)
+    2. [HP025] HPA scales on memory for a JVM workload  [ASSUMED - verify]
+    3. [HP050] Rendered Deployment sets spec.replicas while an HPA manages it  (templates/deployment.yaml)
+    4. [RS002] Memory quantity uses 'm' (MILLI-bytes)  (values.yaml)
+    5. [RS006] CPU limit below CPU request (invalid)  (templates/deployment.yaml)
+    ... +17 more critical/high (see report)
+  Full report: /home/you/hpa-analyzer/hpa_analysis_report.txt
+  (60 findings, 7 proof tables, mode: helm)</code></pre>
+
+<p class="caption">Real output against <code>fixtures/bad-chart</code>. Note the exit code is
+<span class="exit">0</span> — finding problems is not an error. Exit codes only become
+non-zero when you ask for a gate; see <a href="usage.html#ci">CI gates</a>.</p>
+
+<p>The terminal shows a triage list. The detail — the arithmetic, the citations, the
+remediation, and the honest account of what was <em>not</em> checked — lands in
+<code>hpa_analysis_report.txt</code> beside you. Change that path with <code>-o</code>, add a clickable
+HTML version with <code>--html</code>, or get machine-readable findings with <code>--json</code>.</p>
+
+<h2>What comes back</h2>
+
+<div class="cards">
+  <div class="card">
+    <h3><a href="reading-the-report.html#score">A score, and its scale</a></h3>
+    <p>A weighted count of what <em>this run</em> found, always printed alongside the number
+    of categories it was computed over — because that is what makes two scores comparable.</p>
+  </div>
+  <div class="card">
+    <h3><a href="reading-the-report.html#coverage">A coverage section</a></h3>
+    <p>What was analyzed and what was not. An unread file produces no findings, and this
+    section is the only thing standing between that and a false clean bill of health.</p>
+  </div>
+  <div class="card">
+    <h3><a href="reading-the-report.html#basis">Findings with a basis label</a></h3>
+    <p>Every finding says whether it is <code>OBSERVED</code>, <code>DERIVED</code> or <code>ASSUMED</code>, so you
+    can tell what the tool saw from what the tool guessed.</p>
+  </div>
+  <div class="card">
+    <h3><a href="reading-the-report.html#proof">Proof tables</a></h3>
+    <p>The HPA scaling arithmetic and the JVM memory budget, shown as tables you can check
+    by hand rather than verdicts you have to trust.</p>
+  </div>
+</div>
+
+<h2>Where to go next</h2>
+
+<ul>
+  <li><a href="usage.html">Using it</a> — verbosity, CI gates, JSON, <code>--measured</code>,
+      cross-checking against kubeconform / kube-score / polaris.</li>
+  <li><a href="reading-the-report.html">Reading the report</a> — the seven sections, what the
+      grade means, and the three ways it will mislead you.</li>
+  <li><a href="container.html">Container</a> — running it with helm, kubeconform, kube-score and
+      polaris pinned, behind a wrapper that still looks like a shell script.</li>
+  <li><a href="reference.html">Reference</a> — every flag, every exit code, the JSON shape.</li>
+  <li><a href="limits.html">Limits</a> — the verified weaknesses, and what not to assume.</li>
+</ul>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/ITERATIONS.md">how it was built and what was measured</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>

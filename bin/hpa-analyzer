@@ -1,0 +1,377 @@
+#!/usr/bin/env bash
+#
+# hpa-analyzer - run the containerised analyzer as if it were a local command.
+#
+# The contract this script keeps is narrow and worth stating plainly:
+# `hpa-analyzer <flags> <dir>` must behave exactly like `python3 -m hpaanalyzer
+# <flags> <dir>`, including the text of the report and the exit code, with only
+# the toolchain pinned underneath. Everything here exists to hold that promise
+# across a boundary - the container filesystem - that would otherwise break it
+# in three specific ways:
+#
+#   1. PATHS. The report prints `Target directory : <path>` and the terminal
+#      prints `Full report: <path>`. Mount the chart at /work and both become
+#      lies the moment somebody pastes them into another command. So every host
+#      path is mounted AT ITS OWN PATH and the working directory is the host's.
+#      That is what makes the output byte-identical rather than merely
+#      equivalent, and it is the most important decision in this file.
+#
+#   2. OWNERSHIP. Files written by a root container land root-owned in the
+#      caller's directory. `--user` fixes that, at the cost of running as a uid
+#      with no passwd entry - which the image accommodates by pinning HOME.
+#
+#   3. WRITABILITY. The analyzer writes to -o, --json and --html and nowhere
+#      else (verified: a --cross-check run leaves the chart tree byte-identical),
+#      so charts mount read-only and only output parents are writable.
+#
+# Output directory, in decreasing precedence:
+#   $HPA_ANALYZER_OUTPUT_DIR   exported in the environment
+#   the config file            ${XDG_CONFIG_HOME:-~/.config}/hpa-analyzer/config
+#   the first-run prompt       interactive only
+#   $PWD                       non-interactive fallback, announced on stderr
+#
+# A script cannot export a variable into its parent shell, so "remember it as
+# an environment variable" is implemented as a config file that this wrapper
+# reads and re-exposes under that name. An actually-exported variable wins.
+#
+# Other knobs: $HPA_ANALYZER_IMAGE, $HPA_ANALYZER_CONTAINER_CLI (docker,
+# podman, nerdctl), $HPA_ANALYZER_DRY_RUN=1 (print the argv, run nothing),
+# $HPA_ANALYZER_NO_USER=1 (skip --user).
+
+set -euo pipefail
+
+IMAGE="${HPA_ANALYZER_IMAGE:-hpa-analyzer:latest}"
+CLI="${HPA_ANALYZER_CONTAINER_CLI:-docker}"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hpa-analyzer"
+CONFIG_FILE="$CONFIG_DIR/config"
+DEFAULT_REPORT_NAME="hpa_analysis_report.txt"
+
+die()  { printf 'hpa-analyzer: %s\n' "$*" >&2; exit 1; }
+note() { printf 'hpa-analyzer: %s\n' "$*" >&2; }
+
+# ---------------------------------------------------------------------------
+# paths
+# ---------------------------------------------------------------------------
+# `realpath` is absent from a stock macOS, so normalise with cd/pwd. Physical
+# resolution (-P) matters twice over: docker rejects a mount target containing
+# `..`, and /tmp is a symlink to /private/tmp on macOS, so an unresolved path
+# would mount the wrong directory.
+
+abs_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+
+abs_parent() {
+    local d
+    d=$(dirname -- "$1")
+    mkdir -p -- "$d" 2>/dev/null || true
+    abs_dir "$d"
+}
+
+# ---------------------------------------------------------------------------
+# argument scan
+# ---------------------------------------------------------------------------
+# The wrapper must learn two things the argv is hiding - where the chart is,
+# and where output will land - WITHOUT rewriting anything the user typed. The
+# scan therefore has to agree with argparse about which tokens are flag values,
+# or it would mistake the value of `--kube-version 1.31.0` for the positional
+# directory and mount `1.31.0`.
+
+# Flags that consume the following token. `--html` is deliberately not here:
+# its argument is optional (argparse nargs='?') and needs the special rule below.
+VALUE_FLAGS=" -o --output --json --helm --kube-version --assume-java --measured --fail-on --min-score "
+
+# Indexed arrays with explicit counters throughout. macOS ships bash 3.2, where
+# `"${arr[@]}"` and `"${!arr[@]}"` on an EMPTY array are treated as unset and
+# abort the script under `set -u`. Every array here starts empty, so counting by
+# hand is not fussiness - it is the difference between working and not working
+# on the shell this script will actually be run by.
+CHART_ARG=""
+HAS_EXPLICIT_O=0
+PASSTHROUGH_ONLY=0
+OUT_PATHS=()
+OUT_N=0
+
+add_out_path() {
+    OUT_PATHS[$OUT_N]="$1"
+    OUT_N=$((OUT_N + 1))
+}
+
+scan_args() {
+    local argv=("$@") n=$# i=0 a next
+    while [ "$i" -lt "$n" ]; do
+        a="${argv[$i]}"
+        next=""
+        [ $((i + 1)) -lt "$n" ] && next="${argv[$((i + 1))]}"
+
+        case "$a" in
+            -h|--help|--version)
+                PASSTHROUGH_ONLY=1
+                ;;
+
+            # `--flag=value`, which argparse accepts for every long option.
+            --output=*|--json=*|--html=*)
+                add_out_path "${a#*=}"
+                case "$a" in --output=*) HAS_EXPLICIT_O=1 ;; esac
+                ;;
+
+            # `-oVALUE`, which argparse accepts for a short option.
+            -o?*)
+                add_out_path "${a#-o}"
+                HAS_EXPLICIT_O=1
+                ;;
+
+            -o|--output|--json)
+                case "$a" in -o|--output) HAS_EXPLICIT_O=1 ;; esac
+                if [ -n "$next" ]; then
+                    add_out_path "$next"
+                    i=$((i + 1))
+                fi
+                ;;
+
+            --html)
+                # Optional argument: consume the next token only if it does not
+                # look like a flag. That is argparse's own rule, and following
+                # it is what stops `--html --summary chart/` from swallowing
+                # --summary and losing the chart directory.
+                case "$next" in
+                    ""|-*) : ;;
+                    *) add_out_path "$next"; i=$((i + 1)) ;;
+                esac
+                ;;
+
+            -*)
+                case "$VALUE_FLAGS" in
+                    *" $a "*) i=$((i + 1)) ;;
+                esac
+                ;;
+
+            *)
+                [ -z "$CHART_ARG" ] && CHART_ARG="$a"
+                ;;
+        esac
+        i=$((i + 1))
+    done
+}
+
+# ---------------------------------------------------------------------------
+# output directory
+# ---------------------------------------------------------------------------
+
+read_config() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    # Parsed, not sourced. The file is ours, but sourcing would promote a typo
+    # in a dotfile into arbitrary code execution.
+    sed -n 's/^HPA_ANALYZER_OUTPUT_DIR=//p' "$CONFIG_FILE" | tail -n 1 \
+        | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+
+write_config() {
+    mkdir -p -- "$CONFIG_DIR"
+    {
+        printf '# written by hpa-analyzer on first run; edit or delete freely.\n'
+        printf 'HPA_ANALYZER_OUTPUT_DIR="%s"\n' "$1"
+    } > "$CONFIG_FILE"
+}
+
+prompt_for_output_dir() {
+    local reply expanded
+    {
+        printf '\n'
+        printf 'First run. Where should reports be written?\n'
+        printf '  Saved to %s and re-exposed as $HPA_ANALYZER_OUTPUT_DIR.\n' "$CONFIG_FILE"
+        printf '  This sets the DEFAULT only - an explicit -o/--json/--html always wins.\n'
+        printf '  [%s] > ' "$PWD"
+    } >&2
+
+    # Read from the terminal, not stdin: the caller may have legitimately
+    # redirected stdin, and this question is for the human, not the pipe.
+    IFS= read -r reply < /dev/tty || reply=""
+    [ -z "$reply" ] && reply="$PWD"
+
+    case "$reply" in
+        "~")   expanded="$HOME" ;;
+        "~/"*) expanded="$HOME/${reply#\~/}" ;;
+        *)     expanded="$reply" ;;
+    esac
+
+    mkdir -p -- "$expanded" || die "cannot create $expanded"
+    expanded=$(abs_dir "$expanded") || die "cannot resolve $expanded"
+    write_config "$expanded"
+    {
+        printf 'Saved. Change it by editing that file, or export\n'
+        printf 'HPA_ANALYZER_OUTPUT_DIR, which takes precedence.\n\n'
+    } >&2
+    printf '%s\n' "$expanded"
+}
+
+resolve_output_dir() {
+    local from_env="${HPA_ANALYZER_OUTPUT_DIR:-}" from_cfg
+
+    if [ -n "$from_env" ]; then
+        mkdir -p -- "$from_env" 2>/dev/null || true
+        abs_dir "$from_env" \
+            || die "HPA_ANALYZER_OUTPUT_DIR=$from_env cannot be created or resolved"
+        return 0
+    fi
+
+    from_cfg=$(read_config)
+    if [ -n "$from_cfg" ]; then
+        mkdir -p -- "$from_cfg" 2>/dev/null || true
+        abs_dir "$from_cfg" \
+            || die "output directory $from_cfg (from $CONFIG_FILE) cannot be created or resolved"
+        return 0
+    fi
+
+    # No configuration yet. Prompting needs a human; a CI job, a cron entry or
+    # a piped invocation has none, and blocking there would silently break every
+    # gate this tool exists to provide (--fail-on, --min-score, --json). So the
+    # absence of a terminal is not an error here, it is a different default.
+    if [ -t 0 ] && [ -r /dev/tty ]; then
+        prompt_for_output_dir
+    else
+        note "no output directory configured and no terminal to ask on; using $PWD"
+        note "export HPA_ANALYZER_OUTPUT_DIR to choose one non-interactively"
+        abs_dir "$PWD"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# mounts
+# ---------------------------------------------------------------------------
+# Deduplicated by target, because docker rejects two mounts at the same point.
+# Read-write wins when a path is claimed by both. Nesting a writable output
+# directory inside a read-only $PWD is fine - the daemon orders mounts by depth.
+# Parallel indexed arrays rather than an associative array, because macOS ships
+# bash 3.2 and `declare -A` is a bash 4 feature. Iterated by counter rather than
+# by `"${!MOUNT_PATHS[@]}"` for the reason given above the argument scan: on
+# bash 3.2 that expansion aborts under `set -u` while the array is still empty,
+# which is precisely the state of the very first add_mount call.
+
+MOUNT_PATHS=()
+MOUNT_MODES=()
+MOUNT_N=0
+
+add_mount() {
+    local p="$1" mode="$2" i=0
+    [ -z "$p" ] && return 0
+    while [ "$i" -lt "$MOUNT_N" ]; do
+        if [ "${MOUNT_PATHS[$i]}" = "$p" ]; then
+            [ "$mode" = "rw" ] && MOUNT_MODES[$i]="rw"
+            return 0
+        fi
+        i=$((i + 1))
+    done
+    MOUNT_PATHS[$MOUNT_N]="$p"
+    MOUNT_MODES[$MOUNT_N]="$mode"
+    MOUNT_N=$((MOUNT_N + 1))
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+# No arguments is NOT quietly turned into --help. `python3 -m hpaanalyzer` with
+# an empty argv is an argparse usage error that exits 2, and a wrapper that
+# answers the same input with help text and exit 0 has turned a failing command
+# into a passing one. It gets the same treatment as --help only in the sense
+# that it needs no mounts: argparse rejects it before any file is touched.
+[ "$#" -eq 0 ] && PASSTHROUGH_ONLY=1
+
+scan_args "$@"
+
+command -v "$CLI" >/dev/null 2>&1 \
+    || die "$CLI not found on PATH. Set \$HPA_ANALYZER_CONTAINER_CLI if you use podman or nerdctl."
+
+RUN_ARGS=(run --rm)
+
+if [ "$PASSTHROUGH_ONLY" -eq 1 ]; then
+    # --help and --version touch no files, so they get no mounts, no prompt and
+    # no output directory. Asking somebody where to save reports because they
+    # typed --version would be absurd.
+    :
+else
+    PWD_ABS=$(abs_dir "$PWD") || die "cannot resolve the current directory"
+
+    CHART_ABS=""
+    if [ -n "$CHART_ARG" ]; then
+        CHART_ABS=$(abs_dir "$CHART_ARG") || CHART_ABS=""
+    fi
+
+    # $PWD is the container's working directory, so it has to exist there.
+    # Read-only, because the analyzer provably does not write to its input.
+    add_mount "$PWD_ABS" ro
+
+    if [ -z "$CHART_ABS" ]; then
+        # No positional at all, or one that is not a directory. Both are already
+        # reported precisely by the analyzer itself - argparse prints `the
+        # following arguments are required: directory`, the tool prints
+        # `error: <abspath> is not a directory`, and both exit 2. Re-checking it
+        # here would substitute this script's wording and this script's exit
+        # code (1) for theirs, which is exactly the kind of divergence the whole
+        # file exists to prevent. So the run proceeds with only $PWD mounted and
+        # the tool speaks for itself.
+        #
+        # Skipping the output directory here is safe rather than lazy: both
+        # errors are raised before any output file is opened, so nobody is asked
+        # where to save a report that was never going to be written.
+        :
+    else
+        add_mount "$CHART_ABS" ro
+
+        OUTPUT_DIR=$(resolve_output_dir)
+
+        # Every explicit output path needs a writable parent, created host-side
+        # first so the daemon does not create it root-owned.
+        for p in ${OUT_PATHS[@]+"${OUT_PATHS[@]}"}; do
+            out_parent=$(abs_parent "$p") || out_parent=""
+            [ -n "$out_parent" ] \
+                || die "cannot create a directory for the output path: $p"
+            add_mount "$out_parent" rw
+        done
+
+        if [ "$HAS_EXPLICIT_O" -eq 0 ]; then
+            # The saved directory replaces the tool's DEFAULT output path, which
+            # is $PWD/hpa_analysis_report.txt. It never overrides a path the
+            # user typed - that is what keeps "all the flags still work"
+            # literally true. --html with no argument then lands beside the
+            # report for free, since the tool derives that path from -o itself.
+            add_mount "$OUTPUT_DIR" rw
+            set -- "$@" -o "$OUTPUT_DIR/$DEFAULT_REPORT_NAME"
+        fi
+    fi
+
+    RUN_ARGS+=(-w "$PWD_ABS")
+
+    i=0
+    while [ "$i" -lt "$MOUNT_N" ]; do
+        if [ "${MOUNT_MODES[$i]}" = "ro" ]; then
+            RUN_ARGS+=(-v "${MOUNT_PATHS[$i]}:${MOUNT_PATHS[$i]}:ro")
+        else
+            RUN_ARGS+=(-v "${MOUNT_PATHS[$i]}:${MOUNT_PATHS[$i]}")
+        fi
+        i=$((i + 1))
+    done
+
+    # Output belongs to the caller, not to root.
+    [ "${HPA_ANALYZER_NO_USER:-0}" = "1" ] \
+        || RUN_ARGS+=(--user "$(id -u):$(id -g)")
+fi
+
+RUN_ARGS+=("$IMAGE" "$@")
+
+if [ "${HPA_ANALYZER_DRY_RUN:-0}" = "1" ]; then
+    printf '%s' "$CLI"
+    for a in "${RUN_ARGS[@]}"; do printf ' %s' "$a"; done
+    printf '\n'
+    exit 0
+fi
+
+if ! "$CLI" image inspect "$IMAGE" >/dev/null 2>&1; then
+    die "image $IMAGE not found. Build it with:
+    $CLI build -f docker/Dockerfile -t $IMAGE ."
+fi
+
+# exec, so the container's exit status becomes this script's status with
+# nothing in between to swallow it. --fail-on, --min-score, --require-coverage
+# and --check's exit 2 all depend on that being true.
+exec "$CLI" "${RUN_ARGS[@]}"

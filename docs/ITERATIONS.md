@@ -2319,3 +2319,291 @@ the answer, and its endpoints are two more numbers nobody measured.
   provenance. `--measured metaspace=210Mi` was cited back as
   `MEASURED: --measured metaspace=220200960`, a string the user never typed.
   It is now **C2.8(g)** in `SPEC.md`, and CLAIM 8 measures it.
+
+---
+
+## R10 — A tool whose answer depends on `PATH`, shipped as if it did not
+
+### The defect
+
+R6 established, by measurement, that this tool's report is a function of what
+is on `PATH`. Remove `helm` and the same chart's report changes its
+`Analysis mode` from `helm (rendered truth)` to `static`, rewrites every row of
+the coverage table from `rendered by helm` to `statically parsed`, and rewords
+a finding — HP050 loses the word "Rendered". Remove `kubeconform`, `kube-score`
+or `polaris` and `--cross-check` loses whole verdicts, correctly declaring them
+"not checkable".
+
+Nothing in that behaviour is dishonest. The report says what it did and did not
+look at, which is exactly what R6 and R8 were about. The defect is one level
+up: the project's central claim is that a report is an artifact you can hand to
+somebody else and diff against last week's, and **it shipped no way to pin the
+thing the report most depends on**. Two engineers on the same commit of the
+same chart could exchange reports that disagree, with both reports accurate and
+neither of them wrong about anything. `README` said "Recommended: `helm` on
+PATH". It did not say *which* helm, and the answer moves with the version.
+
+There is a second, sharper version of the same defect. `kubeconform` fetches
+JSON schemas over HTTPS. On a machine with no CA bundle it reports
+`x509: certificate signed by unknown authority`; the analyzer records that
+correctly as "not checkable"; and a chart that validates cleanly on one machine
+reads as `0 valid, 0 invalid, 3 not checkable` on another. Nobody lies at any
+step and the answer still changes. This was not reasoned about — it was
+measured, in the first stand-in image built for the proof, which had no
+`/etc/ssl/certs`.
+
+### The authority
+
+The user's request, and the tool's own contract.
+
+The request was specific: run it as a Docker image, but drive that image from a
+shell harness so that to the user it still looks like a shell script and *all
+the flags still work*; ask once, on first run, where output should go, and
+remember it as an environment variable.
+
+The contract is what makes that hard. C10.1, written for this iteration, is the
+bar: `hpa-analyzer FLAGS DIR` must produce the **same bytes and the same exit
+code** as `python3 -m hpaanalyzer FLAGS DIR`. Not the same findings — the same
+bytes. That is a deliberately unforgiving standard, and it is the right one,
+because the report prints `Target directory : <path>` and the terminal prints
+`Full report: <path>`. A wrapper that mounts the chart at `/work` produces a
+report whose own text is wrong the moment somebody pastes a path out of it into
+another command. "Same findings, different paths" is not transparency; it is a
+translation layer the user did not ask for and will not be told about.
+
+One part of the request cannot be honoured literally, and saying so was part of
+the work: **a child process cannot export a variable into its parent shell.**
+That is `execve`, not a shortcoming of bash. Any tool that appears to do it is
+writing to a dotfile without saying so. So "remember it as an environment
+variable" is implemented as a config file at
+`${XDG_CONFIG_HOME:-~/.config}/hpa-analyzer/config` which the wrapper **parses**
+— never sources — and re-exposes under exactly the name the user expected,
+`$HPA_ANALYZER_OUTPUT_DIR`, with an actually-exported variable taking
+precedence over it.
+
+### The proof
+
+`proof/p10_harness.py`, 88 checks. Three of them are worth naming because they
+are where a wrapper of this kind actually fails.
+
+**The wrapper is a second argument parser, and it was checked against the first
+one.** To know where to mount, the shell has to work out which token is the
+positional directory — which means it has to agree with `argparse` about which
+tokens are flag *values*. Checking that against my reading of `__main__.py`
+would prove nothing, so the proof monkey-patches
+`argparse.ArgumentParser.parse_args`, dumps the resulting namespace to stderr,
+and compares it with what the shell decided, over a 19-row matrix. That is what
+catches `--kube-version 1.31.0 chart/` mounting `1.31.0` as if it were a
+directory, and the nastier one: `--html` takes an **optional** argument
+(`nargs='?'`), so `--html --summary chart/` must not swallow `--summary` and
+lose the chart.
+
+**The config file is parsed, not sourced — proven by planting code in it.** The
+proof writes a config containing a `touch <canary>` line, runs the wrapper, and
+asserts the canary was never created. Sourcing a file you own is the kind of
+convenience that turns a typo in a dotfile into arbitrary code execution.
+
+**The report is byte-identical, native versus containerised** — 62704 bytes
+either way, terminal summary and absolute paths included. That is the whole
+claim, and it is only available because every host path is mounted at its own
+path with the container's working directory set to the host's `$PWD`.
+
+The first-run prompt is driven over a real controlling terminal with
+`pty.fork()`; the second run is proven silent; and the no-TTY path is proven to
+complete in 0.01s with two stderr notes and no config file written, because a
+wrapper that blocks on a question in CI has broken every gate the tool exists
+to provide.
+
+### The fix
+
+`bin/hpa-analyzer` and `docker/Dockerfile`, documented in
+[DOCKER.md](DOCKER.md). Four binaries pinned by `ARG` — helm 3.16.4,
+kubeconform 0.6.7, kube-score 1.20.0, polaris 9.6.4 — each one **executed** in
+the build stage before being copied forward, because a binary that downloaded
+but cannot run does not announce itself at run time; it surfaces as a quiet
+coverage downgrade in a report that still looks complete.
+
+The wrapper touches the user's command line in exactly one way: it appends
+`-o <dir>/hpa_analysis_report.txt` when, and only when, no `-o`/`--output` was
+given. It replaces the tool's **default**, never a path the user typed. That is
+what makes "all the flags still work" literally true rather than approximately
+true, and it is the answer to the design question this iteration had to settle
+first — the saved directory could have been made to win over an explicit flag,
+and that would have been a wrapper quietly redirecting output away from where
+the command said to put it.
+
+### Three defects this iteration's own proof found
+
+**A wrapper being helpful is a wrapper diverging.** The first draft validated
+the chart directory in the shell and exited 1 with a tidier message. The
+analyzer already reports both failures precisely — `error: <abspath> is not a
+directory`, exit **2** — so the tidier message substituted the script's wording
+and the script's exit code for the tool's. Caught by CLAIM 8's rows "a
+directory that is not there" and "a file where a directory was expected", both
+of which now read native=2 harness=2.
+
+**`[ "$#" -eq 0 ] && set -- --help` turns a red build green.** `python3 -m
+hpaanalyzer` with an empty argv is an argparse usage error that exits 2. A
+wrapper answering the same input with help text and exit 0 has converted a
+failing command into a passing one, out of pure friendliness. The Dockerfile
+had the identical bug from the identical instinct — `CMD ["--help"]` — and both
+were removed. There is now a comment in each file explaining why the obvious
+convenience is absent, because otherwise somebody will helpfully add it back.
+
+**macOS ships bash 3.2, where `"${arr[@]}"` on an EMPTY array aborts under
+`set -u`.** Every array in the script starts empty, and `add_mount`'s very
+first call is made in exactly that state. This one is handled by construction —
+indexed arrays with hand-maintained counters throughout — and it is stated here
+as *handled*, not as *proven*, because it could not be measured: `ftp.gnu.org`
+returned 403 from this sandbox and no bash 3.2 could be built to test against.
+That is a weaker claim than every other claim in this file and it is labelled
+as one.
+
+### Evaluation — Bar 1 (correctness)
+
+427 tests pass (412 before this iteration, plus the 15 in
+`tests/test_harness.py`) and all 22 `proof/p*.py` scripts exit 0 after the
+change, which
+is the point: this iteration was required to change **nothing** about the
+analyzer, and the evidence that it did not is that every prior iteration's
+proof still reproduces its own measurement. Not one line of `hpaanalyzer/` was
+touched.
+
+### Evaluation — Bar 2 (does it do what it is for)
+
+Yes for the harness, with one honest gap in what was proven.
+
+The image the byte-identity check ran against **is not the image in the
+Dockerfile**. No container registry — and not even `get.helm.sh` — is reachable
+from this sandbox, so the image was assembled with `docker import` from this
+machine's own filesystem. Its four binaries are therefore the *same builds* the
+native run uses. CLAIM 7a therefore proves the **harness** transparent and
+proves nothing whatsoever about whether helm 3.16.4 agrees with this machine's
+helm v3.16. The proof says this in its own output rather than in a comment, and
+`docs/DOCKER.md` repeats it: build the real Dockerfile on a networked machine
+and re-run `proof/p10_harness.py`. If byte-identity then fails, the difference
+**is** the pinned toolchain — which is a fact about the report worth publishing,
+not a bug in the wrapper.
+
+### The honest loss
+
+Pinning the toolchain makes a report reproducible *given the image*. It does
+not make the image's answer the right one. helm 3.16.4 renders what helm 3.16.4
+renders; if the cluster the chart is bound for runs a different Helm, the
+pinned answer is reproducibly the wrong one, and the tool has no way to know.
+The image converts a silent, per-machine variable into an explicit, versioned
+decision. That is strictly better and it is not the same as being correct.
+
+### Also discovered, queued
+
+* **R11 — `--cross-check` output is not reproducible run to run, natively.**
+  Found by accident while trying to prove something else. kube-score printed
+  six distinct md5s over six runs of one chart; polaris two over three;
+  kubeconform varies with what the network answered that second. Four
+  consecutive native runs over `fixtures/bad-chart` produced four distinct
+  md5s with pairwise diffs of 51, 55 and 65 lines. The cause is Go map
+  iteration order inside the tools being quoted. No **verdict** moves — the
+  tallies are computed from counts and are order-independent — but the evidence
+  a reader would use to audit that verdict does, and the whole premise of this
+  project is a report a human can diff against last week's. It is logged rather
+  than fixed because fixing it means reordering another tool's output, and
+  `external.py`'s stated discipline is to reproduce it verbatim. That tension
+  deserves its own iteration.
+* **The external tools' versions are still not recorded in the report.** This
+  iteration pinned them and then did not print them, which leaves the
+  provenance grammar R8 built one field short of complete: a report says it was
+  rendered by helm, and still not which helm. Inside the image the answer is
+  knowable exactly, so the excuse is gone.
+* ~~Nothing drives the shell harness from the Python test suite.~~ **Fixed in
+  this iteration**, because queuing it was the wrong call: the wrapper's
+  argument scan is a parser duplicating `argparse`, and that is precisely the
+  code that drifts silently when a flag is added — add a value-taking flag to
+  `__main__.py`, forget `VALUE_FLAGS` in the wrapper, and `--new-flag foo ./svc`
+  mounts `foo` and analyzes it. `tests/test_harness.py` adds 15 tests that run
+  entirely under `HPA_ANALYZER_DRY_RUN=1`, so they need no daemon, no image and
+  no network, and every claim about the positional is checked against the real
+  `argparse` namespace rather than against a reading of it.
+
+  Six deliberate mutations of `bin/hpa-analyzer` confirm the tests can fail,
+  which is not a formality here — R8's `p8b` shipped a check that compared
+  against the wrong case and could not fail on any input. Dropping
+  `--kube-version` from `VALUE_FLAGS` fails 2; appending `-o` even when the
+  user typed one fails 3; restoring `[ "$#" -eq 0 ] && set -- --help` fails 1;
+  mounting the chart at `/work` fails 1; sourcing the config instead of parsing
+  it fails 1 (the canary test); and validating the chart directory in the shell
+  fails 1.
+
+---
+
+## Documentation site — not an iteration of the analyzer
+
+`docs/` gained a six-page static site (`index`, `usage`, `reading-the-report`,
+`container`, `reference`, `limits`) served by GitHub Pages from `main` /
+`/docs`, with a `.nojekyll` file so the HTML is served verbatim and no build
+step stands between the repository and the page. Nothing in `hpaanalyzer/`
+changed, so this is recorded here rather than numbered as R12.
+
+It is listed in this log for one reason. A documentation site is a set of
+claims about a program, and claims decay silently: a flag gets renamed, an
+exit code changes, a fixture's score moves, and the page keeps saying what it
+said. This project's standing discipline is that a claim is proved by running
+it, so the site gets the same treatment as a fix — `proof/p11_docsite.py`, 171
+checks, re-derives every checkable claim from the running program: both
+directions of the flag round-trip against `--help` (a reference page that
+documents a removed flag is as wrong as one that misses a new flag), every
+`$ ...` transcript re-executed and compared line by line, every quoted figure
+recomputed (the four verbosity line counts, the ten category weights and their
+sum, the twelve JSON keys, the six exit-code rows, the byte-identity figure),
+every internal link and `#anchor` resolved, every `github.com/blob/main/...`
+link checked against a path that exists, and a check that the site never
+mentions the unpublished `trial/` directory.
+
+Four checks failed on its first run and all four were the *checker* being
+wrong, which is worth naming because the reflex is to edit the page:
+`src.count("<head")` also counts every `<header>`; `html.escape` with
+`quote=True` demanded `&#x27;` where a raw apostrophe is correct HTML text;
+a fragment comparison was case-sensitive across a sentence boundary; and the
+byte-identity check looked for `62704` as a literal in `p10_harness.py`, which
+measures that number at runtime rather than storing it. The last was replaced
+with a live re-measurement — 62704 bytes, timestamp normalised — so the page
+is held to the measurement rather than to another file's source text.
+
+The fifth failure was real, and it was the site's. `limits.html` quoted the
+R11 non-determinism as *51 to 65 lines*, itself already a correction of an
+earlier *45 to 57*. The proof script re-runs that measurement instead of
+repeating it, and its batches returned 43–55, then 25–59, then 49–61, then
+38–59. The 51 floor was refuted by measurement. Both pages now state an
+envelope of roughly **25 to 70 lines**, name both superseded ranges, and say
+plainly that any narrow figure quoted for unbounded reshuffling is a sampling
+artefact waiting to be refuted. The check was tightened at the same time,
+because the version that passed was a containment test written as an overlap
+test: it accepted a quoted 51–65 on a run that observed 25. A check that
+cannot fail is not a check.
+
+### The second machine found what one machine could not
+
+Syncing the site to a second machine and running `p11_docsite.py` there
+produced eight failures, and every one of them had the same cause: that host
+has no `helm` on `PATH`. The analyzer correctly fell back to static parsing,
+and static mode is a *longer* report — 170 / 919 / 1031 / 1251 lines against
+the 167 / 906 / 1018 / 1238 the site quoted, and 63410 bytes against 62704 —
+because it adds a parse-problem warning and rewrites every coverage row from
+*rendered by helm* to *statically parsed*.
+
+Nothing was broken. The site was quoting helm-mode figures without saying they
+were helm-mode figures, which is a documentation defect that no amount of
+re-running on the machine the docs were written on could ever surface. Both
+pages now label the figures, publish the helm-less numbers beside them, and
+say what does and does not change: for `fixtures/bad-chart` the verdict did
+not move — GRADE F, 45.5/100, the same 60 findings, the same top five — which
+is a property of that fixture rather than a guarantee, so the note says that
+too and points at the mode banner as the thing to compare first.
+
+The script was fixed in the same spirit. The obvious repair is to skip the
+mode-dependent checks when `helm` is absent, and it is the wrong one: a gate
+that only skips lets the site drift unchecked on exactly the machines that
+would notice. It now branches instead — with `helm` it checks the helm-mode
+figures, without `helm` it checks the static-mode figures the site publishes
+for that case — so both hosts have something that can fail. 172 checks pass
+here, 160 on the machine without the four external validators, and the twelve
+that differ are the ones those validators gate.

@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hpa-analyzer — limits, weaknesses and what not to assume</title>
+<meta name="description" content="The verified weaknesses of hpa-analyzer: what it cannot see, where its estimates fail, and what a clean report does not prove.">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-inner">
+    <a class="wordmark" href="index.html">hpa-analyzer</a>
+    <div class="tagline">Helm + HPA + JVM-in-container analysis, with its own limits written down.</div>
+    <nav class="sitenav">
+      <a href="index.html">Start here</a>
+      <a href="usage.html">Using it</a>
+      <a href="reading-the-report.html">Reading the report</a>
+      <a href="container.html">Container</a>
+      <a href="reference.html">Reference</a>
+      <a href="limits.html" aria-current="page">Limits</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<h1>Limits</h1>
+
+<p class="lede">Every entry below is measured rather than estimated, and each names the proof
+script or test that measures it. This page exists because a tool that only advertises its
+strengths cannot be checked, and because several of these were found by the project's own
+proofs contradicting the project's own README.</p>
+
+<div class="toc">
+  <p>On this page</p>
+  <ul>
+    <li><a href="#good">What it is genuinely good at</a></li>
+    <li><a href="#jvm">JVM detection is a heuristic with a floor</a></li>
+    <li><a href="#cluster">It cannot see your cluster</a></li>
+    <li><a href="#static">Static mode approximates Helm</a></li>
+    <li><a href="#estimates">Estimates are estimates</a></li>
+    <li><a href="#path">Your PATH changes the answer</a></li>
+    <li><a href="#reproducibility"><code>--cross-check</code> does not reproduce</a></li>
+    <li><a href="#scope">Scope is deliberately narrow</a></li>
+    <li><a href="#assume">Do not assume</a></li>
+  </ul>
+</div>
+
+<h2 id="good">What it is genuinely good at</h2>
+
+<p>Context first, so the rest of the page is proportionate. The tool earns its place in a narrow
+lane:</p>
+
+<p><strong>JVM-in-container fitness — nothing else in the standard stack checks this.</strong>
+Applied-versus-inert <code>JAVA_OPTS</code> with correct Docker exec/shell/CMD-form semantics, reading
+pod-spec <code>env</code> and an in-directory entrypoint script before calling a flag "missing"; Java 8
+update-level cgroup awareness with the 8u131 / 8u191 / 8u372 and 11.0.16 boundaries encoded
+correctly; flags that were removed and now abort startup; and heap-versus-limit budget
+arithmetic.</p>
+
+<p><strong>HPA correctness.</strong> The scaling arithmetic — <code>ceil(current × util / target)</code> with the
+±10% tolerance dead-band — is correct, and it catches the <code>spec.replicas</code>-fights-the-HPA-on-
+upgrade bug, the memory-metric-on-a-JVM ratchet, dangling <code>scaleTargetRef</code>, and quoted-string
+numerics.</p>
+
+<p><strong>Accurate reference data.</strong> The deprecated and removed API table — 50 entries — matches
+the official Kubernetes migration guide, and the <code>512m</code> milli-byte and bare-integer
+byte-scale typos are caught.</p>
+
+<p><strong>It knows when its own render was not evidence.</strong> With helm present it renders at both
+ends of the chart's declared <code>kubeVersion</code> range and diffs the emitted <code>(kind, name)</code>
+sets, so an object that exists at one end and not the other is reported as version-dependent
+rather than as fact.</p>
+
+<h2 id="jvm">JVM detection is a heuristic with a floor</h2>
+
+<p>It reads pod-spec env (<code>JAVA_TOOL_OPTIONS</code>, <code>JDK_JAVA_OPTIONS</code>, <code>_JAVA_OPTIONS</code>,
+<code>JAVA_HOME</code>, <code>CATALINA_*</code>, <code>SPRING_*</code>), image names (<code>openjdk</code>, <code>temurin</code>,
+<code>corretto</code>, <code>zulu</code>, <code>graalvm</code>, <code>*-jre</code>, <code>*-jdk</code>, <code>tomcat</code>, <code>jetty</code>,
+<code>wildfly</code>) and any Dockerfile's <code>FROM</code> line and flags.</p>
+
+<div class="warn">
+<p><span class="label">The floor</span> A Java service whose flags are baked into an opaque
+<code>corp.registry/payments-api:4.2</code>, with nothing Java-shaped in its name or pod spec, is
+<strong>invisible</strong> — and that is the most common real-world shape. What changed at R8 is not that
+this is solved but that the tool stopped guessing: the JAVA category reads <code>NOT ASSESSED</code>
+and the reason lists every input it examined, so you can see which one to add. Measured by
+<code>proof/p8b_bar2.py</code> CLAIM 6.</p>
+</div>
+
+<h2 id="cluster">It cannot see your cluster</h2>
+
+<p>LimitRange defaulting — which can turn a "no requests" finding into a false positive —
+ResourceQuota, whether metrics-server or a custom-metrics adapter is installed, and the real
+node shape are all invisible. The report's <em>Verify on your cluster</em> section gives you the
+commands for each gap. Run them; they are the point of the section.</p>
+
+<h2 id="static">Static mode approximates Helm</h2>
+
+<p>Without <code>helm</code> on <code>PATH</code>, <code>tpl</code>, <code>printf</code>, <code>required</code> and subcharts cannot be
+resolved, and conditionals are analyzed as taken. Install helm for rendered-truth analysis. The
+report always states which mode ran, in the header and in every coverage row.</p>
+
+<h2 id="estimates">Estimates are estimates</h2>
+
+<p>The JVM memory-budget components — metaspace, JIT code cache, thread count, direct buffers,
+GC/internal — are <code>DERIVED</code> guesses. Each carries a documented band with a cited source, the
+peak-RSS total is reported as an interval, and when your <code>limits.memory</code> falls <em>inside</em>
+that interval the verdict is <code>UNDETERMINED</code> rather than either endpoint's answer. The report
+then names the smallest set of estimates that would flip it, how far they must move against the
+gap available, and the <code>jcmd VM.native_memory</code> command that settles it. Feed the result back
+with <a href="usage.html#measured"><code>--measured</code></a> and the estimates drop out.</p>
+
+<div class="warn">
+<p><span class="label">What that does not fix</span> The bands themselves are constants somebody
+chose. An app with a large dependency graph or a bytecode-weaving agent can sit outside them,
+and there the tool is confidently wrong in the old way — it merely states a range while being
+wrong. Measured by <code>proof/p9b_bar2.py</code> CLAIM 9.</p>
+</div>
+
+<h2 id="path">Your PATH changes the answer</h2>
+
+<p>With <code>helm</code> absent, the same chart's <code>Analysis mode</code> drops to <code>static</code>, every coverage
+row is rewritten from <em>rendered by helm</em> to <em>statically parsed</em>, and finding HP050 loses a
+word. Two people on the same commit can therefore hold different reports and neither is wrong.</p>
+
+<p>The <a href="container.html">container path</a> pins the four binaries and makes that variable
+explicit. It does not make the pinned answer the <em>right</em> one for your cluster's Helm.</p>
+
+<h2 id="reproducibility"><code>--cross-check</code> does not reproduce</h2>
+
+<div class="danger">
+<p><span class="label">Measured, unfixed</span> <strong>The cross-check section reshuffles between
+identical runs, natively.</strong> Every batch of four consecutive native runs over
+<code>fixtures/bad-chart</code> has produced four distinct md5 sums. The <em>size</em> of the disagreement
+is itself unstable: across three separate measurement rounds the pairwise diffs were 51, 55 and
+65 lines; then 43, 44, 46, 48, 51 and 55; then 25, 30, 44, 48, 51 and 59 — and the proof script's
+own run of the same check once measured 70. Take the honest envelope as roughly <strong>25 to 70
+lines</strong>, not a figure. kube-score printed six distinct outputs over six runs of the same chart;
+polaris printed two over three. The cause is Go map iteration order in the tools being
+quoted.</p>
+<p>No verdict or tally moves — those are count-based — but the evidence underneath them does.
+<strong>Do not diff two <code>--cross-check</code> reports and read meaning into the diff.</strong> Diff the runs
+without it.</p>
+</div>
+
+<p>This was found by accident while trying to prove something else, and it is not caused by
+containers. <code>external.py</code> reproduces external tool output verbatim by design, so "fixing"
+this means reordering another tool's words — a decision this project has not made. It is logged
+as R11 in <a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/ITERATIONS.md"><code>docs/ITERATIONS.md</code></a>,
+not solved.</p>
+
+<p>This paragraph has now been widened twice by its own evidence. The first draft quoted 45 to 57
+lines. Re-measuring returned 51 to 65, so it was corrected. Then <code>proof/p11_docsite.py</code> —
+which re-runs the measurement instead of repeating the number — observed a 25-line diff and a
+59-line one in a single batch, refuting the 51 floor as well. Both superseded ranges are named
+here rather than quietly overwritten, because a document that revises its evidence silently is
+not evidence. The lesson is the one the numbers keep teaching: this is unbounded reshuffling, and
+any narrow range quoted for it is a sampling artefact waiting to be refuted.</p>
+
+<h3>Verification of the ecosystem paths is uneven, and here is how</h3>
+
+<p>All four external validators are exercised against the <strong>real binaries</strong> over real
+directories in <code>tests/test_renderplan.py</code> and <code>tests/test_preflight_external.py</code>, and those
+tests skip rather than mock when the binary is absent. Each verdict is checked against the tool's
+<em>full</em> output, obtained through the same argv builder the tool itself uses, so a test cannot
+pass judgement on a command line that is never run.</p>
+
+<p>Until R6, <code>kube-score</code> and <code>polaris</code> had never been run by any test in any iteration, and
+<strong>both were misreported</strong>. The fix is why the report now prints a <code>status derived from:</code>
+line under each tool. <code>tests/test_helm_mode.py</code> still substitutes a canned render on purpose:
+it tests mode <em>selection</em> logic, not helm. Tool versions differ — confirm against your own
+installed versions before relying on them in CI.</p>
+
+<h2 id="scope">Scope is deliberately narrow</h2>
+
+<p>One chart per run. It is a JVM/HPA/resources linter, not a general Kubernetes validator, a
+schema checker, or a security scanner.</p>
+
+<p><strong>Subcharts are not graded.</strong> A vendored chart is someone else's code, and folding its
+findings into your score would misrepresent what you are responsible for. What changed at R7 is
+that the boundary no longer functions as evidence: until then the objects <code>helm template</code>
+rendered from <code>charts/</code> were <em>discarded</em>, so a rule could not see a Deployment helm had
+just produced from <code>charts/worker</code> and reported the user's correct HPA as dangling at HIGH,
+labelled <code>OBSERVED</code>. Followed, its <code>Fix:</code> line retargeted a working HPA onto the wrong
+workload — and the tool then called the broken chart clean. Those objects are now recorded but
+never scored, and the coverage table names the subchart, its kinds and its object names.</p>
+
+<div class="warn">
+<p><span class="label">The cost</span> Where subcharts exist but did not render — static mode, or
+a subchart gated off by a condition — a target the tool cannot find is reported as
+<code>UNDETERMINED</code> rather than as a finding. Which means <strong>a genuinely dangling reference in an
+umbrella chart analysed without helm will not be flagged.</strong> That is a real loss, taken
+deliberately, and the coverage row says which claim went unchecked and how to settle it.</p>
+</div>
+
+<h2 id="assume">Do not assume</h2>
+
+<p><strong>A high grade does not mean "deployable."</strong> An <code>A+</code> is a statement about the files, by
+static analysis. It is not a promise the workload will schedule, scale, or even be admitted on
+your cluster.</p>
+
+<p><strong>It does not replace your existing tools.</strong> Run it alongside <code>kubeconform</code> for schema,
+a policy engine — Kyverno, OPA, or ValidatingAdmissionPolicy — for org rules, and a real load
+test. Use <code>--fail-on high</code> as a warning gate, not as the sole merge blocker.</p>
+
+<p><strong>Absence of a finding is not proof of correctness.</strong> It can mean "not covered." Read the
+coverage section.</p>
+
+<p><strong>The proof-table numbers are arithmetic on estimates, not measurements.</strong></p>
+
+<p><strong>A finding's severity accounts for the cluster version your chart declares, and nothing
+else about your cluster.</strong> Deprecated-API severity is reconciled against <code>kubeVersion</code>: the
+same <code>networking.k8s.io/v1beta1</code> Ingress is CRITICAL with no declared range or a modern one,
+and LOW under <code>&gt;=1.19.0-0 &lt;1.21.0-0</code>, a range where the API still exists. Namespace
+LimitRange, quota and metrics setup are invisible and are in no severity at all.</p>
+
+<p><strong>The external-validator output is not ours.</strong> <code>--cross-check</code> runs those tools and
+reports their output verbatim; this project does not vouch for it.</p>
+
+<p><strong>It does not know a Java version the base-image tag hides.</strong> Pass
+<code>--assume-java &lt;ver&gt;</code> for internal or corporate base images. Since R8 this no longer skips
+the JVM checks wholesale — heap-versus-limit arithmetic needs only the flags and the limit, and
+runs without it. What degrades is the version-dependent subset, and the report says which. Note
+also that this flag asks <em>you</em> for something usually sitting in your repository already, in
+<code>pom.xml</code>, <code>build.gradle</code> or <code>.java-version</code>; reading it from there is queued, not
+done.</p>
+
+<p><strong>Running it in the container makes the answer reproducible, not correct.</strong> The image pins
+helm 3.16.4 and three validators; if your cluster runs a different Helm, the pinned render is
+reproducibly the wrong one and the tool cannot tell. Nor was the shipped image itself proven
+equivalent to a native run — the byte-identity measurement used a locally assembled stand-in,
+because no registry was reachable from the machine this was built on. The
+<a href="container.html#notestablished">container page</a> says exactly what that does and does not
+establish.</p>
+
+<p><strong>A <code>NOT ASSESSED</code> category is not a pass, and a missing finding is not either.</strong> The
+tool deliberately prints "the JVM checks did not apply, and here is what would make them apply"
+rather than going quiet, because in a report that only lists failures, an unrun check and a
+passed check look identical.</p>
+
+<hr>
+
+<p>If any of the above matters to you, the tool is designed to help you check it rather than take
+its word — that is what the basis labels, the coverage section, and the "Verify on your cluster"
+commands are for. The full iteration history, including the defects each round's own proofs
+found in the round that introduced them, is in
+<a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/ITERATIONS.md"><code>docs/ITERATIONS.md</code></a>.</p>
+
+</main>
+
+<footer class="sitefoot">
+  <div class="sitefoot-inner">
+    hpa-analyzer 1.0.0 ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer">source on GitHub</a> ·
+    <a href="https://github.com/jamiegunn/hpa-analyzer/blob/main/docs/ITERATIONS.md">docs/ITERATIONS.md</a> ·
+    MIT
+  </div>
+</footer>
+
+</body>
+</html>
